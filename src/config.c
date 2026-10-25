@@ -114,6 +114,7 @@ bool config_load(const char *path, AppConfig *config, char *error,
     config->options.max_seconds = 10;
     config->options.max_samples = 0;
     config->options.startup_timeout_seconds = 30;
+    config->monitor_backend = MONITOR_BACKEND_CGROUPV2;
 
     char *absolute_path = realpath(path, NULL);
     if (absolute_path == NULL) {
@@ -135,6 +136,20 @@ bool config_load(const char *path, AppConfig *config, char *error,
     unsigned long long max_seconds = config->options.max_seconds;
     unsigned long long max_samples = config->options.max_samples;
     unsigned long long startup_timeout = config->options.startup_timeout_seconds;
+    toml_datum_t monitor_name = toml_get(result.toptab, "monitor");
+    if (monitor_name.type != TOML_UNKNOWN) {
+        char *name = copy_toml_string(monitor_name);
+        if (name == NULL ||
+            !monitor_backend_parse(name, &config->monitor_backend)) {
+            snprintf(error, error_size,
+                     "configuration key 'monitor' must be 'polling' or 'cgroupv2'");
+            free(name);
+            toml_free(result);
+            config_free(config);
+            return false;
+        }
+        free(name);
+    }
     bool valid = read_option(result.toptab, "min_bytes", SIZE_MAX, &min_bytes,
                              error, error_size) &&
                  read_option(result.toptab, "warmup", UINT_MAX, &warmup,

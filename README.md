@@ -39,6 +39,7 @@ warmup = 1
 max_seconds = 10
 max_samples = 0
 startup_timeout_seconds = 30
+monitor = "cgroupv2"
 
 [kitty]
 cmd = "kitty --config {CFG} {CMD}"
@@ -94,38 +95,52 @@ the new process must own the measured PTY session.
 
 ## Measurements
 
+Before measuring, cvtebench checks whether each terminal and its worker are
+placed in separate cgroups, then launches every selected terminal once for a
+separate warmup phase. It uses the same configured command for checks, warmup,
+and measured runs. The worker is placed in a sibling cgroup so its resource use
+does not count toward the terminal.
+
+The `monitor` setting selects `cgroupv2` or `polling` and defaults to
+`cgroupv2`. Cgroup v2 reads terminal CPU time from `cpu.stat`, and memory from
+`memory.current` and `memory.peak`; memory includes charged cache and other
+cgroup memory, not only process RSS. The `polling` backend retains the prior
+`/proc` process-tree sampler and reports summed RSS. Both backends report CPU as
+a percentage of one core and memory as time-weighted average and peak MiB. Each
+startup and workload result has its own interval. If cgroup delegation is not
+available, the check says so and cgroup resource values are recorded as null;
+cvtebench does not turn missing counters into zero or silently switch backends.
+
 The startup result measures time from launching the configured command until
-the in-terminal worker is ready. Each later result covers its own warmups and
-PTY writes. CPU time and resident memory are sampled from the terminal process
-tree, excluding the benchmark worker: CPU is shown as a percentage of one core,
-and memory is shown as time-weighted average and peak RSS in MiB. Each terminal
-and benchmark receives its own interval.
-The printed wall time covers the full workload interval, including warmups;
-the write average, 90th percentile, and standard deviation cover measured
-payload writes and exclude the per-sample reset and setup bytes.
+the in-terminal worker is ready. Each later result measures PTY writes after
+the separate warmup phase. The printed wall time covers the measured workload;
+the write average, 90th percentile, and standard deviation cover payload writes
+and exclude the per-sample reset and setup bytes.
 
 The report is printed after every benchmark and as a collective summary after
 all terminals finish. Matching logs are created in the current working
 directory as `cvtebench-YYYYMMDD-HHMMSS.log` and
 `cvtebench-YYYYMMDD-HHMMSS.jsonl`.
 
-The JSONL file is compact and contains one run metadata record, one flat result
-record per measured terminal and benchmark, and one end record. Results are
-not duplicated for the printed summaries. Durations use seconds or
-milliseconds as named, memory uses bytes, and `cpu_pct` is percent of one core.
-Workload results also include payload size and write-time statistics; partial
-results are marked with `"complete":false`.
+The JSONL file is compact and contains run metadata, one cgroup check record per
+terminal, one flat result record per measured terminal and benchmark, and one
+end record. Results are not duplicated for printed summaries. The schema
+version is 2. Durations use seconds or milliseconds as named, memory uses
+bytes, and `cpu_pct` is percent of one core. Missing resource measurements are
+JSON null. Workload results also include payload size and write-time statistics;
+partial results are marked with `"complete":false`.
 
 ```jsonl
-{"type":"run","schema":1,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml"}
-{"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"cpu_s":0.01,"cpu_pct":12.5,"rss_avg_bytes":7340032,"rss_peak_bytes":8388608,"samples":1,"payload_bytes":0,"complete":true}
+{"type":"run","schema":2,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2"}
+{"type":"cgroup_check","terminal":"kitty/compact","status":"inside","worker_moved":true,"detail":"terminal and worker are in separate cgroups"}
+{"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"resources_available":true,"samples":1,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608}
 {"type":"end","status":"ok","results":1}
 ```
 
-Configuration options default to 1 MiB minimum payloads, one warmup, ten
-seconds per workload, unlimited samples within that time, and a 30 second
-startup timeout. `max_samples` can cap the sample count; it does not extend
-`max_seconds`.
+Configuration options default to 1 MiB minimum payloads, one warmup pass per
+workload, ten seconds per measured workload, unlimited samples within that
+time, and a 30 second startup timeout. `max_samples` can cap the sample count;
+it does not extend `max_seconds`.
 
 ## Workloads
 

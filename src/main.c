@@ -16,9 +16,10 @@ typedef struct {
 static void print_usage(const char *program) {
     printf("Usage: %s CONFIG.toml [OPTIONS]\n\n", program);
     printf("Runs terminal emulator benchmarks on modern Linux from named TOML entries.\n");
-    printf("It launches each selected terminal in turn, pins it to CPU 0, and starts\n");
-    printf("a worker in its PTY. It samples process-tree CPU time and RSS for startup\n");
-    printf("and each selected workload, and records PTY write times. Results are\n");
+    printf("It first checks cgroup placement, warms each terminal, then benchmarks\n");
+    printf("selected terminals one at a time with the terminal pinned to CPU 0. The\n");
+    printf("TOML selects cgroup v2 accounting or /proc process-tree polling. Both\n");
+    printf("sample CPU and memory per interval and record PTY write times. Results are\n");
     printf("printed per benchmark, summarized per terminal and collectively, and\n");
     printf("saved as timestamped text and JSONL logs in the current directory.\n\n");
     printf("Options:\n");
@@ -26,6 +27,8 @@ static void print_usage(const char *program) {
     printf("      --validate           Check the TOML and selectors without running\n");
     printf("  -t, --terminal NAME      Run only this terminal; repeat to select more\n");
     printf("  -b, --benchmark NAME     Run only this workload; repeat to select more\n\n");
+    printf("TOML monitor defaults to cgroupv2; choose \"polling\" to use /proc.\n");
+    printf("Cgroup placement checks run automatically before warmup and measurement.\n\n");
     printf("A terminal name selects all its config variants; a name such as\n");
     printf("kitty/compact selects one variant. Workloads:\n  ");
     size_t line_length = 2;
@@ -82,6 +85,9 @@ int main(int argc, char **argv) {
     bool run = false;
     bool validate = false;
     bool help = false;
+    WorkerPhase worker_phase = WORKER_PHASE_BENCHMARK;
+    const char *worker_cgroup_path = "-";
+    bool private_worker_option = false;
     SelectorList terminals = {0};
     SelectorList benchmarks = {0};
     bool arguments_valid = true;
@@ -116,6 +122,32 @@ int main(int argc, char **argv) {
                 break;
             }
             socket_path = argv[i];
+        } else if (strcmp(argv[i], "--worker-phase") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "cvtebench: --worker-phase needs a phase\n");
+                arguments_valid = false;
+                break;
+            }
+            private_worker_option = true;
+            if (strcmp(argv[i], "check") == 0) {
+                worker_phase = WORKER_PHASE_CHECK;
+            } else if (strcmp(argv[i], "warmup") == 0) {
+                worker_phase = WORKER_PHASE_WARMUP;
+            } else if (strcmp(argv[i], "benchmark") == 0) {
+                worker_phase = WORKER_PHASE_BENCHMARK;
+            } else {
+                fprintf(stderr, "cvtebench: unknown worker phase '%s'\n", argv[i]);
+                arguments_valid = false;
+                break;
+            }
+        } else if (strcmp(argv[i], "--worker-cgroup") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "cvtebench: --worker-cgroup needs a path\n");
+                arguments_valid = false;
+                break;
+            }
+            private_worker_option = true;
+            worker_cgroup_path = argv[i];
         } else if (strcmp(argv[i], "--help") == 0 ||
                    strcmp(argv[i], "-h") == 0) {
             help = true;
@@ -157,6 +189,12 @@ int main(int argc, char **argv) {
         selector_list_free(&benchmarks);
         return 2;
     }
+    if (private_worker_option && socket_path == NULL) {
+        fprintf(stderr, "cvtebench: worker phase and cgroup options require --worker-socket\n");
+        selector_list_free(&terminals);
+        selector_list_free(&benchmarks);
+        return 2;
+    }
     if (run && validate) {
         fprintf(stderr, "cvtebench: --run and --validate cannot be combined\n");
         selector_list_free(&terminals);
@@ -164,11 +202,16 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+    bool worker_cgroup_moved = socket_path != NULL &&
+                               monitor_join_worker_cgroup(worker_cgroup_path);
+
     RunSelection selection = {
         .terminal_names = terminals.items,
         .terminal_count = terminals.count,
         .benchmark_names = benchmarks.items,
         .benchmark_count = benchmarks.count,
+        .phase = worker_phase,
+        .worker_cgroup_moved = worker_cgroup_moved,
     };
 
     AppConfig config;

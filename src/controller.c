@@ -32,7 +32,7 @@ typedef struct {
     double sample_mean_ms;
     double sample_p90_ms;
     double sample_stddev_ms;
-    ResourceMetrics metrics;
+    MonitorMetrics metrics;
     bool complete;
 } Summary;
 
@@ -62,6 +62,17 @@ static bool terminal_name_matches(const char *configured, const char *requested)
     return strcmp(configured, requested) == 0 ||
            (strncmp(configured, requested, length) == 0 &&
             configured[length] == '/');
+}
+
+/* Apply the same terminal selector rules to each of the three run phases. */
+static bool terminal_is_selected(const TerminalConfig *terminal,
+                                const RunSelection *selection) {
+    if (selection == NULL || selection->terminal_count == 0) return true;
+    for (size_t i = 0; i < selection->terminal_count; ++i) {
+        if (terminal_name_matches(terminal->name,
+                                  selection->terminal_names[i])) return true;
+    }
+    return false;
 }
 
 /* Check a supplied selector set before opening a log or launching terminals. */
@@ -251,6 +262,8 @@ static char **expand_command(const TerminalConfig *terminal,
                              const RunSelection *selection,
                              const char *executable_path,
                              const char *socket_path, const char *config_path,
+                             WorkerPhase phase,
+                             const char *worker_cgroup_path,
                              size_t *argc_out,
                              char *error, size_t error_size) {
     StringList words = {0};
@@ -296,7 +309,7 @@ static char **expand_command(const TerminalConfig *terminal,
     }
 
     size_t selected_count = selection == NULL ? 0 : selection->benchmark_count;
-    size_t argc = words.count + 4 + selected_count * 2;
+    size_t argc = words.count + 8 + selected_count * 2;
     char **argv = calloc(argc + 1, sizeof(*argv));
     if (argv == NULL) {
         snprintf(error, error_size, "out of memory while expanding terminal command");
@@ -315,6 +328,14 @@ static char **expand_command(const TerminalConfig *terminal,
             argv[output++] = strdup("--run");
             argv[output++] = strdup("--worker-socket");
             argv[output++] = strdup(socket_path);
+            argv[output++] = strdup("--worker-phase");
+            argv[output++] = strdup(phase == WORKER_PHASE_CHECK
+                                        ? "check"
+                                        : phase == WORKER_PHASE_WARMUP
+                                              ? "warmup"
+                                              : "benchmark");
+            argv[output++] = strdup("--worker-cgroup");
+            argv[output++] = strdup(worker_cgroup_path);
         }
     }
     for (size_t i = 0; i < selected_count; ++i) {
@@ -406,13 +427,20 @@ static void print_summary(const Summary *summary) {
     report_styled(summary->complete ? color_bold_cyan : color_yellow,
                   "  %s%s\n", summary->benchmark,
                   summary->complete ? "" : "  [PARTIAL]");
-    report_styled(result_color,
-                  "    Wall       %9.2f ms   CPU %8.2f%% (%9.2f ms)   RSS avg %8.2f MiB  peak %8.2f MiB   N %u\n",
-                  summary->metrics.wall_seconds * 1000.0, cpu_percent,
-                  summary->metrics.cpu_seconds * 1000.0,
-                  summary->metrics.average_rss_bytes / 1048576.0,
-                  (double)summary->metrics.peak_rss_bytes / 1048576.0,
-                  summary->samples);
+    if (summary->metrics.resources_available) {
+        report_styled(result_color,
+                      "    Wall       %9.2f ms   CPU %8.2f%% (%9.2f ms)   Memory avg %8.2f MiB  peak %8.2f MiB   N %u\n",
+                      summary->metrics.wall_seconds * 1000.0, cpu_percent,
+                      summary->metrics.cpu_seconds * 1000.0,
+                      summary->metrics.average_memory_bytes / 1048576.0,
+                      (double)summary->metrics.peak_memory_bytes / 1048576.0,
+                      summary->samples);
+    } else {
+        report_styled(result_color,
+                      "    Wall       %9.2f ms   CPU      n/a (      n/a ms)   Memory avg      n/a  peak      n/a   N %u\n",
+                      summary->metrics.wall_seconds * 1000.0,
+                      summary->samples);
+    }
     if (summary->bytes > 0) {
         report_styled(color_dim,
                       "    PTY write  avg %9.2f ms   p90 %9.2f ms   sd %9.2f ms   payload %zu B/sample\n",
@@ -460,12 +488,12 @@ static void print_collective_summary(const SummaryList *summaries) {
 
     report_styled(color_bold_cyan, "Collective results\n");
     size_t resource_width = terminal_width + benchmark_width + 2 * 8 + 10 + 9 +
-                            10 + 13 + 13 + 7 + 9;
+                            10 + 15 + 15 + 7 + 9;
     report_styled(color_bold_cyan,
-                  "%-*s  %-*s  %10s  %9s  %10s  %13s  %13s  %7s  %9s\n",
+                  "%-*s  %-*s  %10s  %9s  %10s  %15s  %15s  %7s  %9s\n",
                   (int)terminal_width, "Terminal", (int)benchmark_width,
-                  "Benchmark", "Wall ms", "CPU %", "CPU ms", "RSS avg MiB",
-                  "RSS peak MiB", "N", "Result");
+                  "Benchmark", "Wall ms", "CPU %", "CPU ms", "Memory avg MiB",
+                  "Memory peak MiB", "N", "Result");
     print_table_rule(resource_width);
     for (size_t i = 0; i < summaries->count; ++i) {
         const Summary *summary = &summaries->items[i];
@@ -473,16 +501,26 @@ static void print_collective_summary(const SummaryList *summaries) {
                                  ? summary->metrics.cpu_seconds /
                                        summary->metrics.wall_seconds * 100.0
                                  : 0;
-        report_styled(summary->complete ? color_green : color_yellow,
-                      "%-*s  %-*s  %10.2f  %9.2f  %10.2f  %13.2f  %13.2f  %7u  %9s\n",
-                      (int)terminal_width, summary->terminal,
-                      (int)benchmark_width, summary->benchmark,
-                      summary->metrics.wall_seconds * 1000.0, cpu_percent,
-                      summary->metrics.cpu_seconds * 1000.0,
-                      summary->metrics.average_rss_bytes / 1048576.0,
-                      (double)summary->metrics.peak_rss_bytes / 1048576.0,
-                      summary->samples,
-                      summary->complete ? "complete" : "partial");
+        if (summary->metrics.resources_available) {
+            report_styled(summary->complete ? color_green : color_yellow,
+                          "%-*s  %-*s  %10.2f  %9.2f  %10.2f  %15.2f  %15.2f  %7u  %9s\n",
+                          (int)terminal_width, summary->terminal,
+                          (int)benchmark_width, summary->benchmark,
+                          summary->metrics.wall_seconds * 1000.0, cpu_percent,
+                          summary->metrics.cpu_seconds * 1000.0,
+                          summary->metrics.average_memory_bytes / 1048576.0,
+                          (double)summary->metrics.peak_memory_bytes / 1048576.0,
+                          summary->samples,
+                          summary->complete ? "complete" : "partial");
+        } else {
+            report_styled(summary->complete ? color_yellow : color_red,
+                          "%-*s  %-*s  %10.2f  %9s  %10s  %15s  %15s  %7u  %9s\n",
+                          (int)terminal_width, summary->terminal,
+                          (int)benchmark_width, summary->benchmark,
+                          summary->metrics.wall_seconds * 1000.0, "n/a", "n/a",
+                          "n/a", "n/a", summary->samples,
+                          summary->complete ? "complete" : "partial");
+        }
     }
 
     if (has_write_results) {
@@ -563,9 +601,11 @@ static void jsonl_write_run(const AppConfig *config, const char *started_at) {
     yyjson_mut_doc *doc = jsonl_new_object(&object);
     if (doc == NULL) return;
     bool ok = yyjson_mut_obj_add_str(doc, object, "type", "run") &&
-              yyjson_mut_obj_add_uint(doc, object, "schema", 1) &&
+              yyjson_mut_obj_add_uint(doc, object, "schema", 2) &&
               yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
-              yyjson_mut_obj_add_str(doc, object, "config", config->path);
+              yyjson_mut_obj_add_str(doc, object, "config", config->path) &&
+              yyjson_mut_obj_add_str(doc, object, "monitor",
+                                     monitor_backend_name(config->monitor_backend));
     if (!ok) {
         yyjson_mut_doc_free(doc);
         errno = ENOMEM;
@@ -589,17 +629,26 @@ static void jsonl_write_result(const Summary *summary) {
               yyjson_mut_obj_add_str(doc, object, "benchmark", summary->benchmark) &&
               yyjson_mut_obj_add_real(doc, object, "wall_s",
                                       summary->metrics.wall_seconds) &&
-              yyjson_mut_obj_add_real(doc, object, "cpu_s",
-                                      summary->metrics.cpu_seconds) &&
-              yyjson_mut_obj_add_real(doc, object, "cpu_pct", cpu_percent) &&
-              yyjson_mut_obj_add_uint(doc, object, "rss_avg_bytes",
-                                      (uint64_t)summary->metrics.average_rss_bytes) &&
-              yyjson_mut_obj_add_uint(doc, object, "rss_peak_bytes",
-                                      summary->metrics.peak_rss_bytes) &&
+              yyjson_mut_obj_add_bool(doc, object, "resources_available",
+                                      summary->metrics.resources_available) &&
               yyjson_mut_obj_add_uint(doc, object, "samples", summary->samples) &&
               yyjson_mut_obj_add_uint(doc, object, "payload_bytes",
                                       (uint64_t)summary->bytes) &&
               yyjson_mut_obj_add_bool(doc, object, "complete", summary->complete);
+    if (ok && summary->metrics.resources_available) {
+        ok = yyjson_mut_obj_add_real(doc, object, "cpu_s",
+                                     summary->metrics.cpu_seconds) &&
+             yyjson_mut_obj_add_real(doc, object, "cpu_pct", cpu_percent) &&
+             yyjson_mut_obj_add_uint(doc, object, "mem_avg_bytes",
+                                     (uint64_t)summary->metrics.average_memory_bytes) &&
+             yyjson_mut_obj_add_uint(doc, object, "mem_peak_bytes",
+                                     summary->metrics.peak_memory_bytes);
+    } else if (ok) {
+        ok = yyjson_mut_obj_add_null(doc, object, "cpu_s") &&
+             yyjson_mut_obj_add_null(doc, object, "cpu_pct") &&
+             yyjson_mut_obj_add_null(doc, object, "mem_avg_bytes") &&
+             yyjson_mut_obj_add_null(doc, object, "mem_peak_bytes");
+    }
     if (ok && summary->bytes > 0) {
         ok = yyjson_mut_obj_add_real(doc, object, "write_avg_ms",
                                      summary->sample_mean_ms) &&
@@ -615,6 +664,37 @@ static void jsonl_write_result(const Summary *summary) {
         return;
     }
     if (jsonl_write_doc(doc, object)) ++jsonl_result_count;
+}
+
+/* Record the automatic cgroup placement check without creating a result row. */
+static void jsonl_write_cgroup_check(const char *terminal,
+                                     MonitorIsolation isolation,
+                                     const char *detail,
+                                     bool worker_moved) {
+    yyjson_mut_val *object = NULL;
+    yyjson_mut_doc *doc = jsonl_new_object(&object);
+    if (doc == NULL) return;
+    const char *status = isolation == MONITOR_ISOLATION_INSIDE
+                             ? "inside"
+                             : isolation == MONITOR_ISOLATION_OUTSIDE
+                                   ? "outside"
+                                   : "unavailable";
+    bool ok = yyjson_mut_obj_add_str(doc, object, "type", "cgroup_check") &&
+              yyjson_mut_obj_add_str(doc, object, "terminal", terminal) &&
+              yyjson_mut_obj_add_str(doc, object, "status", status) &&
+              yyjson_mut_obj_add_bool(doc, object, "worker_moved", worker_moved);
+    if (ok) {
+        ok = detail == NULL
+                 ? yyjson_mut_obj_add_null(doc, object, "detail")
+                 : yyjson_mut_obj_add_str(doc, object, "detail", detail);
+    }
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        jsonl_error();
+        return;
+    }
+    jsonl_write_doc(doc, object);
 }
 
 /* Mark the end of a run with success and the number of result rows emitted. */
@@ -756,18 +836,41 @@ static void stop_terminal(pid_t child, bool already_reaped, int child_status) {
 
 /* Consume a control message and update the interval measurements. */
 static bool handle_event(char *line, const TerminalConfig *terminal,
-                         ProcessMonitor *monitor, SummaryList *summaries,
+                         Monitor *monitor, SummaryList *summaries,
                          char *active_benchmark, size_t *active_bytes,
                          bool *active, bool *ready, bool *done,
                          bool *worker_failed, bool include_startup,
+                         bool *isolation_outside, WorkerPhase phase,
                          uint64_t launch_ns) {
     if (line[0] == 'R' && line[1] == ' ') {
         long worker_pid = 0;
         long terminal_pid = 0;
-        if (sscanf(line + 2, "%ld %ld", &worker_pid, &terminal_pid) != 2) return false;
+        unsigned worker_moved = 0;
+        if (sscanf(line + 2, "%ld %ld %u", &worker_pid, &terminal_pid,
+                   &worker_moved) != 3) return false;
         monitor_set_worker(monitor, (pid_t)worker_pid, (pid_t)terminal_pid);
-        ResourceMetrics metrics = monitor_end(monitor, monotonic_now_ns());
-        if (include_startup) {
+        if (phase == WORKER_PHASE_CHECK) {
+            const char *detail = NULL;
+            MonitorIsolation isolation = monitor_check_isolation(
+                monitor, (pid_t)terminal_pid, (pid_t)worker_pid,
+                worker_moved != 0, &detail);
+            jsonl_write_cgroup_check(terminal->name, isolation, detail,
+                                    worker_moved != 0);
+            if (isolation == MONITOR_ISOLATION_INSIDE) {
+                report_styled(color_green, "  Cgroup check: inside (%s)\n",
+                              detail == NULL ? "ok" : detail);
+            } else if (isolation == MONITOR_ISOLATION_OUTSIDE) {
+                *isolation_outside = true;
+                report_styled(color_red, "  Cgroup check: outside (%s)\n",
+                              detail == NULL ? "placement failed" : detail);
+            } else {
+                report_styled(color_yellow,
+                              "  Cgroup check: unavailable (%s)\n",
+                              detail == NULL ? monitor_scope_error(monitor) : detail);
+            }
+        }
+        if (phase == WORKER_PHASE_BENCHMARK && include_startup) {
+            MonitorMetrics metrics = monitor_end(monitor, monotonic_now_ns());
             Summary summary = {0};
             snprintf(summary.terminal, sizeof(summary.terminal), "%s",
                      terminal->name);
@@ -778,8 +881,12 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
             if (!summary_push(summaries, &summary)) return false;
             jsonl_write_result(&summaries->items[summaries->count - 1]);
         }
-        report_styled(color_green, "  Ready\n");
-        if (include_startup) print_summary(&summaries->items[summaries->count - 1]);
+        if (phase != WORKER_PHASE_CHECK) {
+            report_styled(color_green, "  Ready\n");
+        }
+        if (phase == WORKER_PHASE_BENCHMARK && include_startup) {
+            print_summary(&summaries->items[summaries->count - 1]);
+        }
         (void)launch_ns;
         *ready = true;
         return true;
@@ -839,6 +946,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                         const AppConfig *config,
                         const RunSelection *selection,
                         const char *executable_path,
+                        WorkerPhase phase,
                         SummaryList *summaries) {
     char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     int listener = open_control_socket(socket_path, sizeof(socket_path));
@@ -857,30 +965,59 @@ static bool run_terminal(const TerminalConfig *terminal,
         unlink(socket_path);
         return false;
     }
+    MonitorBackend backend = phase == WORKER_PHASE_CHECK
+                                 ? MONITOR_BACKEND_CGROUPV2
+                                 : config->monitor_backend;
+    Monitor *monitor = monitor_create(backend);
+    if (monitor == NULL) {
+        report_styled(color_red,
+                      "  Error: out of memory while creating monitor\n");
+        close(listener);
+        unlink(socket_path);
+        if (config_path[0] != '\0') unlink(config_path);
+        return false;
+    }
     size_t argc = 0;
     char **argv = expand_command(terminal, config, selection, executable_path,
-                                 socket_path, config_path, &argc, error,
+                                 socket_path, config_path, phase,
+                                 monitor_worker_cgroup_path(monitor),
+                                 &argc, error,
                                  sizeof(error));
     if (argv == NULL) {
         report_styled(color_red, "  Error: %s\n", error);
         close(listener);
         unlink(socket_path);
         if (config_path[0] != '\0') unlink(config_path);
+        monitor_destroy(monitor);
         return false;
     }
 
-    uint64_t launch_ns = monotonic_now_ns();
-    pid_t child = fork();
-    if (child < 0) {
-        report_styled(color_red, "  Error: cannot fork terminal: %s\n",
+    int gate[2];
+    if (pipe2(gate, O_CLOEXEC) != 0) {
+        report_styled(color_red, "  Error: cannot create launch gate: %s\n",
                       strerror(errno));
         free_argv(argv, argc);
         close(listener);
         unlink(socket_path);
         if (config_path[0] != '\0') unlink(config_path);
+        monitor_destroy(monitor);
+        return false;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        report_styled(color_red, "  Error: cannot fork terminal: %s\n",
+                      strerror(errno));
+        free_argv(argv, argc);
+        close(gate[0]);
+        close(gate[1]);
+        close(listener);
+        unlink(socket_path);
+        if (config_path[0] != '\0') unlink(config_path);
+        monitor_destroy(monitor);
         return false;
     }
     if (child == 0) {
+        close(gate[1]);
         setpgid(0, 0);
         cpu_set_t cpus;
         CPU_ZERO(&cpus);
@@ -891,26 +1028,46 @@ static bool run_terminal(const TerminalConfig *terminal,
                     strerror(errno));
             _exit(126);
         }
+        char release = 0;
+        ssize_t gate_result;
+        do {
+            gate_result = read(gate[0], &release, 1);
+        } while (gate_result < 0 && errno == EINTR);
+        close(gate[0]);
+        if (gate_result != 1 || release != 'G') _exit(126);
         execvp(argv[0], argv);
         dprintf(STDERR_FILENO, "cvtebench: cannot start '%s': %s\n",
                 argv[0], strerror(errno));
         _exit(127);
     }
+    close(gate[0]);
     setpgid(child, child);
     free_argv(argv, argc);
-
-    ProcessMonitor *monitor = monitor_create(child, 0);
-    if (monitor == NULL) {
-        report_styled(color_red,
-                      "  Error: out of memory while starting process monitor\n");
+    monitor_attach_terminal(monitor, child);
+    uint64_t launch_ns = monotonic_now_ns();
+    monitor_begin(monitor, launch_ns);
+    char release = 'G';
+    ssize_t released;
+    do {
+        released = write(gate[1], &release, 1);
+    } while (released < 0 && errno == EINTR);
+    close(gate[1]);
+    if (released != 1) {
+        report_styled(color_red, "  Error: cannot release terminal launch gate\n");
         stop_terminal(child, false, 0);
         close(listener);
         unlink(socket_path);
         if (config_path[0] != '\0') unlink(config_path);
+        monitor_destroy(monitor);
         return false;
     }
-    monitor_begin(monitor, launch_ns);
-    report_styled(color_cyan, "  Starting with CPU affinity 0...\n");
+    if (phase == WORKER_PHASE_CHECK) {
+        report_styled(color_cyan, "  Checking cgroup placement...\n");
+    } else if (phase == WORKER_PHASE_WARMUP) {
+        report_styled(color_cyan, "  Warming terminal on CPU 0...\n");
+    } else {
+        report_styled(color_cyan, "  Starting with CPU affinity 0...\n");
+    }
 
     uint64_t deadline = launch_ns +
                         (uint64_t)config->options.startup_timeout_seconds *
@@ -924,6 +1081,14 @@ static bool run_terminal(const TerminalConfig *terminal,
         monitor_tick(monitor, monotonic_now_ns());
         if (event.revents & POLLIN) {
             connection = accept4(listener, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+            if (connection >= 0) {
+                struct ucred peer = {0};
+                socklen_t peer_size = sizeof(peer);
+                if (getsockopt(connection, SOL_SOCKET, SO_PEERCRED, &peer,
+                               &peer_size) == 0) {
+                    monitor_set_worker(monitor, peer.pid, 0);
+                }
+            }
         }
         if (!child_reaped) {
             pid_t status = waitpid(child, &child_status, WNOHANG);
@@ -951,12 +1116,20 @@ static bool run_terminal(const TerminalConfig *terminal,
     bool ready = false;
     bool done = false;
     bool worker_failed = false;
+    bool isolation_outside = false;
     bool active = false;
     char active_benchmark[128] = {0};
     size_t active_bytes = 0;
     char input[2048];
     size_t input_length = 0;
     uint64_t seconds_per_benchmark = config->options.max_seconds;
+    if (phase == WORKER_PHASE_WARMUP && config->options.warmup > 1) {
+        uint64_t warmup_count = config->options.warmup;
+        seconds_per_benchmark =
+            seconds_per_benchmark > UINT64_MAX / warmup_count
+                ? UINT64_MAX
+                : seconds_per_benchmark * warmup_count;
+    }
     uint64_t seconds_limit = UINT64_MAX / 1000000000ULL;
     uint64_t worker_allowance;
     if (seconds_per_benchmark >
@@ -1001,6 +1174,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                                                 &worker_failed,
                                                 selection_includes_benchmark(
                                                     selection, "startup"),
+                                                &isolation_outside, phase,
                                                 launch_ns);
                     consumed = i + 1;
                     if (!handled && !done) {
@@ -1025,7 +1199,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     }
 
     if (active) {
-        ResourceMetrics partial = monitor_end(monitor, monotonic_now_ns());
+        MonitorMetrics partial = monitor_end(monitor, monotonic_now_ns());
         Summary summary = {0};
         snprintf(summary.terminal, sizeof(summary.terminal), "%s", terminal->name);
         snprintf(summary.benchmark, sizeof(summary.benchmark), "%s",
@@ -1042,7 +1216,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     stop_terminal(child, child_reaped, child_status);
     monitor_destroy(monitor);
     if (config_path[0] != '\0') unlink(config_path);
-    return ready && done && !worker_failed;
+    return ready && done && !worker_failed && !isolation_outside;
 }
 
 /* Run configured terminals sequentially and write both per-terminal and final views. */
@@ -1069,39 +1243,54 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     report_styled(color_bold_cyan, "cvtebench\n");
     report_styled(color_dim, "Terminal emulator benchmark suite\n");
     report_styled(color_dim, "Configuration  %s\n", config->path);
+    report_styled(color_dim, "Monitor        %s\n",
+                  monitor_backend_name(config->monitor_backend));
     report_styled(color_dim, "Text log       %s\n", log_path);
     report_styled(color_dim, "JSONL log      %s\n\n", jsonl_path);
     bool all_ok = true;
-    size_t terminal_number = 0;
     size_t selected_terminal_count = 0;
     for (size_t i = 0; i < config->terminal_count; ++i) {
-        bool selected = selection == NULL || selection->terminal_count == 0;
-        for (size_t j = 0; !selected && j < selection->terminal_count; ++j) {
-            selected = terminal_name_matches(config->terminals[i].name,
-                                             selection->terminal_names[j]);
+        if (terminal_is_selected(&config->terminals[i], selection)) {
+            selected_terminal_count++;
         }
-        if (selected) selected_terminal_count++;
     }
-    for (size_t i = 0; i < config->terminal_count; ++i) {
-        bool selected = selection == NULL || selection->terminal_count == 0;
-        for (size_t j = 0; !selected && j < selection->terminal_count; ++j) {
-            selected = terminal_name_matches(config->terminals[i].name,
-                                             selection->terminal_names[j]);
+    const WorkerPhase phases[] = {
+        WORKER_PHASE_CHECK,
+        WORKER_PHASE_WARMUP,
+        WORKER_PHASE_BENCHMARK,
+    };
+    const char *const phase_titles[] = {
+        "Cgroup placement checks",
+        "Warmup",
+        "Benchmarks",
+    };
+    for (size_t phase_index = 0;
+         phase_index < sizeof(phases) / sizeof(phases[0]); ++phase_index) {
+        report_styled(color_bold_cyan, "%s\n", phase_titles[phase_index]);
+        size_t terminal_number = 0;
+        for (size_t i = 0; i < config->terminal_count; ++i) {
+            if (!terminal_is_selected(&config->terminals[i], selection)) continue;
+            terminal_number++;
+            report_styled(color_cyan, "[%zu/%zu] %s\n",
+                          terminal_number, selected_terminal_count,
+                          config->terminals[i].name);
+            size_t before = summaries.count;
+            bool ok = run_terminal(&config->terminals[i], config, selection,
+                                   executable_path, phases[phase_index],
+                                   &summaries);
+            if (!ok) all_ok = false;
+            size_t collected = summaries.count - before;
+            if (phase_index == 2) {
+                report_styled(ok ? color_green : color_red,
+                              "  %s: %zu benchmark result%s\n\n",
+                              ok ? "Finished" : "Failed", collected,
+                              collected == 1 ? "" : "s");
+            } else {
+                const char *label = phase_index == 0 ? "Cgroup check" : "Warmup";
+                report_styled(ok ? color_green : color_red, "  %s: %s\n\n",
+                              ok ? "Finished" : "Failed", label);
+            }
         }
-        if (!selected) continue;
-        terminal_number++;
-        report_styled(color_bold_cyan, "[%zu/%zu] %s\n",
-                      terminal_number, selected_terminal_count,
-                      config->terminals[i].name);
-        size_t before = summaries.count;
-        bool ok = run_terminal(&config->terminals[i], config, selection,
-                               executable_path, &summaries);
-        if (!ok) all_ok = false;
-        size_t collected = summaries.count - before;
-        report_styled(ok ? color_green : color_red,
-                      "  %s: %zu benchmark result%s\n\n",
-                      ok ? "Finished" : "Failed", collected,
-                      collected == 1 ? "" : "s");
     }
 
     print_collective_summary(&summaries);

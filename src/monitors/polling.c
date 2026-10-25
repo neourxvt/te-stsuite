@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "cvtebench.h"
+#include "backend.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -17,7 +18,7 @@ typedef struct {
 } ProcEntry;
 
 /* State for one independently measured startup or benchmark interval. */
-struct ProcessMonitor {
+typedef struct {
     pid_t roots[8];
     size_t root_count;
     pid_t worker_pid;
@@ -30,8 +31,9 @@ struct ProcessMonitor {
     uint64_t current_rss_bytes;
     uint64_t peak_rss_bytes;
     long double rss_integral;
+    bool observed;
     bool active;
-};
+} PollingState;
 
 /* Return a monotonic timestamp used for workload timing and polling. */
 uint64_t monotonic_now_ns(void) {
@@ -164,7 +166,7 @@ static ProcEntry *find_proc_entry(ProcEntry *entries, size_t count, pid_t pid) {
 }
 
 /* Test whether an entry belongs to the terminal tree and is not the worker. */
-static bool belongs_to_terminal(ProcessMonitor *monitor, ProcEntry *entries,
+static bool belongs_to_terminal(PollingState *monitor, ProcEntry *entries,
                                 size_t count, pid_t pid) {
     ProcEntry *entry = find_proc_entry(entries, count, pid);
     for (unsigned depth = 0; entry != NULL && depth < 128; ++depth) {
@@ -178,12 +180,12 @@ static bool belongs_to_terminal(ProcessMonitor *monitor, ProcEntry *entries,
 }
 
 /* Snapshot terminal-tree CPU ticks and resident memory from procfs. */
-static void take_snapshot(ProcessMonitor *monitor, uint64_t *ticks,
+static bool take_snapshot(PollingState *monitor, uint64_t *ticks,
                           uint64_t *rss_bytes) {
     *ticks = 0;
     *rss_bytes = 0;
     DIR *proc = opendir("/proc");
-    if (proc == NULL) return;
+    if (proc == NULL) return false;
 
     ProcEntry *entries = NULL;
     size_t count = 0;
@@ -206,36 +208,41 @@ static void take_snapshot(ProcessMonitor *monitor, uint64_t *ticks,
     closedir(proc);
     qsort(entries, count, sizeof(*entries), compare_proc_entry);
 
+    bool observed = false;
     for (size_t i = 0; i < count; ++i) {
         if (!belongs_to_terminal(monitor, entries, count, entries[i].pid)) continue;
+        observed = true;
         *ticks += entries[i].ticks;
         *rss_bytes += entries[i].rss_bytes;
     }
     free(entries);
+    return observed;
 }
 
-/* Create an accounting context rooted at the spawned terminal process. */
-ProcessMonitor *monitor_create(pid_t root_pid, pid_t worker_pid) {
-    ProcessMonitor *monitor = calloc(1, sizeof(*monitor));
+/* Create process-tree accounting for the terminal launcher. */
+static void *polling_create(pid_t root_pid, CgroupScope *scope) {
+    (void)scope;
+    PollingState *monitor = calloc(1, sizeof(*monitor));
     if (monitor == NULL) return NULL;
     monitor->roots[0] = root_pid;
     monitor->root_count = 1;
-    monitor->worker_pid = worker_pid;
     monitor->ticks_per_second = sysconf(_SC_CLK_TCK);
     if (monitor->ticks_per_second <= 0) monitor->ticks_per_second = 100;
-    take_snapshot(monitor, &monitor->current_ticks,
-                  &monitor->current_rss_bytes);
+    monitor->observed = take_snapshot(monitor, &monitor->current_ticks,
+                                      &monitor->current_rss_bytes);
     return monitor;
 }
 
-/* Free a process accounting context. */
-void monitor_destroy(ProcessMonitor *monitor) {
+/* Free process-tree accounting state. */
+static void polling_destroy(void *state) {
+    PollingState *monitor = state;
     free(monitor);
 }
 
 /* Exclude the benchmark worker and follow a terminal process spawned by it. */
-void monitor_set_worker(ProcessMonitor *monitor, pid_t worker_pid,
-                        pid_t terminal_pid) {
+static void polling_set_worker(void *state, pid_t worker_pid,
+                               pid_t terminal_pid) {
+    PollingState *monitor = state;
     monitor->worker_pid = worker_pid;
     if (terminal_pid <= 0 || monitor->root_count >= 8) return;
     for (size_t i = 0; i < monitor->root_count; ++i) {
@@ -245,9 +252,10 @@ void monitor_set_worker(ProcessMonitor *monitor, pid_t worker_pid,
 }
 
 /* Begin a new measurement interval using a fresh process-tree snapshot. */
-void monitor_begin(ProcessMonitor *monitor, uint64_t start_ns) {
-    take_snapshot(monitor, &monitor->current_ticks,
-                  &monitor->current_rss_bytes);
+static void polling_begin(void *state, uint64_t start_ns) {
+    PollingState *monitor = state;
+    monitor->observed |= take_snapshot(monitor, &monitor->current_ticks,
+                                       &monitor->current_rss_bytes);
     monitor->start_ns = start_ns;
     monitor->last_sample_ns = start_ns;
     monitor->start_ticks = monitor->current_ticks;
@@ -257,11 +265,12 @@ void monitor_begin(ProcessMonitor *monitor, uint64_t start_ns) {
 }
 
 /* Accumulate time-weighted RSS while refreshing CPU and peak memory. */
-void monitor_tick(ProcessMonitor *monitor, uint64_t now_ns) {
+static void polling_tick(void *state, uint64_t now_ns) {
+    PollingState *monitor = state;
     if (monitor == NULL || !monitor->active) return;
     uint64_t ticks = 0;
     uint64_t rss = 0;
-    take_snapshot(monitor, &ticks, &rss);
+    monitor->observed |= take_snapshot(monitor, &ticks, &rss);
     if (now_ns > monitor->last_sample_ns) {
         monitor->rss_integral += (long double)monitor->current_rss_bytes *
                                  (long double)(now_ns - monitor->last_sample_ns);
@@ -273,9 +282,10 @@ void monitor_tick(ProcessMonitor *monitor, uint64_t now_ns) {
 }
 
 /* Finish a measurement and convert accumulated counters to comparable units. */
-ResourceMetrics monitor_end(ProcessMonitor *monitor, uint64_t end_ns) {
-    monitor_tick(monitor, end_ns);
-    ResourceMetrics metrics = {0};
+static MonitorMetrics polling_end(void *state, uint64_t end_ns) {
+    PollingState *monitor = state;
+    polling_tick(monitor, end_ns);
+    MonitorMetrics metrics = {.resources_available = monitor->observed};
     uint64_t elapsed_ns = end_ns > monitor->start_ns
                               ? end_ns - monitor->start_ns
                               : 0;
@@ -286,10 +296,23 @@ ResourceMetrics monitor_end(ProcessMonitor *monitor, uint64_t end_ns) {
     metrics.cpu_seconds = (double)cpu_delta /
                           (double)monitor->ticks_per_second;
     if (metrics.wall_seconds > 0) {
-        metrics.average_rss_bytes =
+        metrics.average_memory_bytes =
             (double)(monitor->rss_integral / (long double)elapsed_ns);
     }
-    metrics.peak_rss_bytes = monitor->peak_rss_bytes;
+    metrics.peak_memory_bytes = monitor->peak_rss_bytes;
     monitor->active = false;
     return metrics;
+}
+
+/* Expose the polling implementation through the shared monitor interface. */
+const MonitorBackendOps *polling_monitor_ops(void) {
+    static const MonitorBackendOps operations = {
+        .create = polling_create,
+        .destroy = polling_destroy,
+        .set_worker = polling_set_worker,
+        .begin = polling_begin,
+        .tick = polling_tick,
+        .end = polling_end,
+    };
+    return &operations;
 }

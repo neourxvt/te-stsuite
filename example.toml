@@ -3,6 +3,7 @@ warmup = 1
 max_seconds = 10
 max_samples = 0
 startup_timeout_seconds = 30
+monitor = "cgroupv2"
 
 [alacritty]
 cmd = "alacritty -e {CMD}"
@@ -13,10 +14,6 @@ cmd = "kitty --config {CFG} {CMD}"
 [kitty.configs]
 compact = """
 font_size 11.0
-"""
-
-large = """
-font_size 14.0
 """
 
 [nrxvt]

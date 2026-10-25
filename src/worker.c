@@ -114,6 +114,7 @@ static int compare_duration(const void *left, const void *right) {
 int worker_run(const AppConfig *config, const RunSelection *selection,
                const char *socket_path) {
     signal(SIGPIPE, SIG_IGN);
+    bool worker_moved = selection != NULL && selection->worker_cgroup_moved;
     int socket_fd = connect_controller(socket_path);
     if (socket_fd < 0) {
         fprintf(stderr, "cvtebench: cannot connect to controller: %s\n",
@@ -133,10 +134,15 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         size.ws_col = 80;
     }
 
-    if (!send_event(socket_fd, "R %ld %ld\n", (long)getpid(),
-                    (long)getppid())) {
+    if (!send_event(socket_fd, "R %ld %ld %u\n", (long)getpid(),
+                    (long)getppid(), worker_moved ? 1U : 0U)) {
         close(socket_fd);
         return 1;
+    }
+    if (selection != NULL && selection->phase == WORKER_PHASE_CHECK) {
+        send_event(socket_fd, "D\n");
+        close(socket_fd);
+        return 0;
     }
 
     BenchContext context = {.rows = size.ws_row, .columns = size.ws_col};
@@ -157,6 +163,28 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
             return 1;
         }
 
+        if (selection != NULL && selection->phase == WORKER_PHASE_WARMUP) {
+            bool warmed = true;
+            for (unsigned warmup = 0; warmup < config->options.warmup; ++warmup) {
+                if (!run_sample(&data, NULL)) {
+                    warmed = false;
+                    break;
+                }
+            }
+            static const char reset[] = "\033c";
+            if (warmed) warmed = write_all(STDOUT_FILENO, reset,
+                                           sizeof(reset) - 1);
+            buffer_free(&data.setup);
+            buffer_free(&data.payload);
+            if (!warmed) {
+                send_event(socket_fd, "F %s: PTY write failed during warmup\n",
+                           benchmark->name);
+                close(socket_fd);
+                return 1;
+            }
+            continue;
+        }
+
         if (!send_event(socket_fd, "S %s %zu\n", benchmark->name,
                         data.payload.length)) {
             buffer_free(&data.setup);
@@ -166,13 +194,6 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         }
 
         bool ok = true;
-        for (unsigned warmup = 0; warmup < config->options.warmup; ++warmup) {
-            if (!run_sample(&data, NULL)) {
-                ok = false;
-                break;
-            }
-        }
-
         uint64_t deadline = monotonic_now_ns() +
                             (uint64_t)config->options.max_seconds * 1000000000ULL;
         unsigned samples = 0;

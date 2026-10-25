@@ -1,6 +1,8 @@
 #ifndef CVTEBENCH_H
 #define CVTEBENCH_H
 
+#include "monitor.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -55,16 +57,26 @@ typedef struct {
 typedef struct {
     char *path;
     RunOptions options;
+    MonitorBackend monitor_backend;
     TerminalConfig *terminals;
     size_t terminal_count;
 } AppConfig;
 
-/* Optional command-line filters; an empty list means all entries. */
+/* The worker phase is passed privately by the controller to each terminal. */
+typedef enum {
+    WORKER_PHASE_CHECK,
+    WORKER_PHASE_WARMUP,
+    WORKER_PHASE_BENCHMARK,
+} WorkerPhase;
+
+/* Optional command-line filters and private in-terminal worker settings. */
 typedef struct {
     const char *const *terminal_names;
     size_t terminal_count;
     const char *const *benchmark_names;
     size_t benchmark_count;
+    WorkerPhase phase;
+    bool worker_cgroup_moved;
 } RunSelection;
 
 extern const Benchmark cvtebench_benchmarks[];
@@ -93,23 +105,5 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
                const char *socket_path);
 int controller_run(const AppConfig *config, const RunSelection *selection,
                    const char *executable_path);
-
-/* Linux process-tree accounting used for per-interval resource summaries. */
-typedef struct {
-    double wall_seconds;
-    double cpu_seconds;
-    double average_rss_bytes;
-    uint64_t peak_rss_bytes;
-} ResourceMetrics;
-
-typedef struct ProcessMonitor ProcessMonitor;
-ProcessMonitor *monitor_create(pid_t root_pid, pid_t worker_pid);
-void monitor_destroy(ProcessMonitor *monitor);
-void monitor_set_worker(ProcessMonitor *monitor, pid_t worker_pid,
-                        pid_t terminal_pid);
-void monitor_begin(ProcessMonitor *monitor, uint64_t start_ns);
-void monitor_tick(ProcessMonitor *monitor, uint64_t now_ns);
-ResourceMetrics monitor_end(ProcessMonitor *monitor, uint64_t end_ns);
-uint64_t monotonic_now_ns(void);
 
 #endif
