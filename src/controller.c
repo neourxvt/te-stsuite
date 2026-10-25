@@ -74,6 +74,15 @@ static size_t jsonl_result_count;
 static bool jsonl_failed;
 static bool color_enabled;
 
+/* Signal handlers only request cancellation; normal control flow owns cleanup. */
+static volatile sig_atomic_t stop_signal;
+static const int stop_signals[] = {SIGINT, SIGTERM, SIGHUP};
+static struct sigaction saved_stop_actions[3];
+
+static void request_stop(int signal_number) {
+    if (stop_signal == 0) stop_signal = signal_number;
+}
+
 static bool jsonl_error(void);
 static bool jsonl_write_doc(yyjson_mut_doc *doc, yyjson_mut_val *object);
 static yyjson_mut_doc *jsonl_new_object(yyjson_mut_val **object);
@@ -1366,23 +1375,30 @@ static void close_control_fifo(int reader_fd, int keepalive_fd,
     if (path != NULL && path[0] != '\0') unlink(path);
 }
 
-/* Ask a spawned terminal process group to exit, then reap its direct child. */
-static void stop_terminal(pid_t child, bool already_reaped, int child_status) {
-    (void)child_status;
-    if (!already_reaped) {
-        kill(-child, SIGTERM);
-        kill(child, SIGTERM);
-        for (unsigned attempt = 0; attempt < 100; ++attempt) {
+/* Workers can own a PTY session outside the terminal's process group. */
+static void stop_terminal(pid_t child, bool already_reaped, int child_status,
+                          pid_t worker) {
+    kill(-child, SIGTERM);
+    if (!already_reaped) kill(child, SIGTERM);
+    if (worker > 0) kill(worker, SIGTERM);
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        if (!already_reaped) {
             pid_t result = waitpid(child, &child_status, WNOHANG);
-            if (result == child || (result < 0 && errno == ECHILD)) return;
-            struct timespec pause = {.tv_sec = 0, .tv_nsec = 20000000};
-            nanosleep(&pause, NULL);
+            already_reaped = result == child || (result < 0 && errno == ECHILD);
         }
-        kill(-child, SIGKILL);
+        bool group_alive = kill(-child, 0) == 0 || errno == EPERM;
+        bool worker_alive = worker > 0 &&
+                            (kill(worker, 0) == 0 || errno == EPERM);
+        if (already_reaped && !group_alive && !worker_alive) return;
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = 20000000};
+        nanosleep(&pause, NULL);
+    }
+    /* A launcher may exit before descendants that ignore the graceful stop. */
+    kill(-child, SIGKILL);
+    if (worker > 0) kill(worker, SIGKILL);
+    if (!already_reaped) {
         kill(child, SIGKILL);
         while (waitpid(child, &child_status, 0) < 0 && errno == EINTR) {}
-    } else {
-        kill(-child, SIGTERM);
     }
 }
 
@@ -1394,13 +1410,14 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                          bool *worker_failed, bool include_startup,
                          IsolationCheckResult *check_result, WorkerPhase phase,
                          uint64_t launch_ns,
-                         TerminalRunResult *run_result) {
+                         TerminalRunResult *run_result, pid_t *run_worker) {
     if (line[0] == 'R' && line[1] == ' ') {
         long worker_pid = 0;
         long terminal_pid = 0;
         unsigned worker_moved = 0;
         if (sscanf(line + 2, "%ld %ld %u", &worker_pid, &terminal_pid,
                    &worker_moved) != 3) return false;
+        *run_worker = (pid_t)worker_pid;
         monitor_set_worker(monitor, (pid_t)worker_pid, (pid_t)terminal_pid);
         if (phase == WORKER_PHASE_CHECK) {
             const char *detail = NULL;
@@ -1526,6 +1543,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (run_result != NULL) {
         memset(run_result, 0, sizeof(*run_result));
     }
+    if (stop_signal != 0) return false;
     bool capture_outputs = run_result != NULL;
     bool retain_output = phase == WORKER_PHASE_WARMUP;
     int stdout_pipe[2] = {-1, -1};
@@ -1628,6 +1646,11 @@ static bool run_terminal(const TerminalConfig *terminal,
         return false;
     }
     if (child == 0) {
+        setpgid(0, 0);
+        /* The terminal must not inherit the controller's cancellation handler. */
+        for (size_t i = 0; i < sizeof(stop_signals) / sizeof(stop_signals[0]); ++i) {
+            sigaction(stop_signals[i], &saved_stop_actions[i], NULL);
+        }
         close(gate[1]);
         if (capture_outputs) {
             close(stdout_pipe[0]);
@@ -1642,7 +1665,6 @@ static bool run_terminal(const TerminalConfig *terminal,
             close(stdout_pipe[1]);
             close(stderr_pipe[1]);
         }
-        setpgid(0, 0);
         char release = 0;
         ssize_t gate_result;
         do {
@@ -1693,7 +1715,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         report_styled(color_red, "  Error: cannot isolate terminal process: %s\n",
                       monitor_scope_error(monitor));
         close(gate[1]);
-        stop_terminal(child, false, 0);
+        stop_terminal(child, false, 0, 0);
         if (capture_outputs) {
             capture_terminal_output(&stdout_fd, &stderr_fd, run_result,
                                    retain_output);
@@ -1710,12 +1732,14 @@ static bool run_terminal(const TerminalConfig *terminal,
     char release = 'G';
     ssize_t released;
     do {
-        released = write(gate[1], &release, 1);
-    } while (released < 0 && errno == EINTR);
+        released = stop_signal == 0 ? write(gate[1], &release, 1) : -1;
+    } while (released < 0 && errno == EINTR && stop_signal == 0);
     close(gate[1]);
     if (released != 1) {
-        report_styled(color_red, "  Error: cannot release terminal launch gate\n");
-        stop_terminal(child, false, 0);
+        if (stop_signal == 0) {
+            report_styled(color_red, "  Error: cannot release terminal launch gate\n");
+        }
+        stop_terminal(child, false, 0, 0);
         if (capture_outputs) {
             capture_terminal_output(&stdout_fd, &stderr_fd, run_result,
                                    retain_output);
@@ -1735,7 +1759,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     bool worker_started = false;
     bool child_reaped = false;
     int child_status = 0;
-    while (!worker_started && monotonic_now_ns() < deadline) {
+    while (stop_signal == 0 && !worker_started && monotonic_now_ns() < deadline) {
         struct pollfd event = {.fd = control_fd, .events = POLLIN};
         int polled = poll(&event, 1, 20);
         if (capture_outputs && run_result != NULL &&
@@ -1763,14 +1787,14 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (worker_started) unlink(control_path);
     if (!worker_started) {
         monitor_end(monitor, monotonic_now_ns());
-        if (child_reaped) {
+        if (stop_signal == 0 && child_reaped) {
             report_styled(color_red,
                           "  Error: terminal exited before the worker sent a control event\n");
-        } else {
+        } else if (stop_signal == 0) {
             report_styled(color_red, "  Error: startup timed out after %u seconds\n",
                           config->options.startup_timeout_seconds);
         }
-        stop_terminal(child, child_reaped, child_status);
+        stop_terminal(child, child_reaped, child_status, 0);
         if (capture_outputs && run_result != NULL) {
             if (!capture_terminal_output(&stdout_fd, &stderr_fd, run_result,
                                          retain_output) &&
@@ -1792,6 +1816,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     }
 
     bool ready = false;
+    pid_t worker = 0;
     bool done = false;
     bool worker_failed = false;
     bool active = false;
@@ -1821,7 +1846,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                                    ? UINT64_MAX
                                    : deadline + worker_allowance;
 
-    while (!done && monotonic_now_ns() < worker_deadline) {
+    while (stop_signal == 0 && !done && monotonic_now_ns() < worker_deadline) {
         struct pollfd event = {.fd = control_fd, .events = POLLIN};
         int polled = poll(&event, 1, 20);
         uint64_t now = monotonic_now_ns();
@@ -1857,7 +1882,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                                                 &worker_failed,
                                                 include_startup,
                                                 check_result, phase,
-                                                launch_ns, run_result);
+                                                launch_ns, run_result, &worker);
                     consumed = i + 1;
                     if (!handled && !done) {
                         report_styled(color_red,
@@ -1895,7 +1920,8 @@ static bool run_terminal(const TerminalConfig *terminal,
         }
     }
     close_control_fifo(control_fd, keepalive_fd, control_path);
-    stop_terminal(child, child_reaped, child_status);
+    stop_terminal(child, child_reaped, child_status,
+                  stop_signal != 0 ? worker : 0);
     if (capture_outputs && run_result != NULL) {
         if (!capture_terminal_output(&stdout_fd, &stderr_fd, run_result,
                                      retain_output) &&
@@ -1911,7 +1937,8 @@ static bool run_terminal(const TerminalConfig *terminal,
     }
     monitor_destroy(monitor);
     cleanup_terminal_files(config_path, config_dir, xresources_path);
-    return ready && done && !worker_failed && capture_errno == 0 &&
+    return stop_signal == 0 && ready && done && !worker_failed &&
+           capture_errno == 0 &&
            (phase != WORKER_PHASE_CHECK ||
             (check_result != NULL && check_result->passed));
 }
@@ -1942,7 +1969,7 @@ static bool run_startup_benchmark(const TerminalConfig *terminal,
     uint64_t target_duration_ns =
         (uint64_t)config->options.startup_min_seconds * 1000000000ULL;
 
-    while (!complete) {
+    while (stop_signal == 0 && !complete) {
         if (samples == capacity) {
             size_t next_capacity = capacity == 0 ? 16 : capacity * 2;
             if (next_capacity < capacity ||
@@ -2097,8 +2124,8 @@ static int finish_run_logs(bool succeeded, const char *log_path,
 }
 
 /* Run configured terminals sequentially and write both per-terminal and final views. */
-int controller_run(const AppConfig *config, const RunSelection *selection,
-                   const char *executable_path) {
+static int run_controller(const AppConfig *config, const RunSelection *selection,
+                          const char *executable_path) {
     char log_path[128];
     char jsonl_path[128];
     char started_at[32];
@@ -2167,6 +2194,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                                result, false, &check_output);
         captured_stream_free(&check_output.stdout_output);
         captured_stream_free(&check_output.stderr_output);
+        if (stop_signal != 0) break;
         if (!result->recorded) {
             snprintf(result->detail, sizeof(result->detail),
                      "check did not complete; see the terminal error above");
@@ -2186,11 +2214,16 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         if (!result->passed) checks_passed = false;
     }
 
-    if (!checks_passed) {
-        report_styled(color_red,
-                      "\nBenchmark run stopped before warmup because process isolation checks failed.\n");
-        print_isolation_check_summary(check_results, check_index,
-                                      cgroups_required);
+    if (stop_signal != 0 || !checks_passed) {
+        if (stop_signal != 0) {
+            report_styled(color_yellow, "\nRun interrupted by signal %d.\n",
+                          (int)stop_signal);
+        } else {
+            report_styled(color_red,
+                          "\nBenchmark run stopped before warmup because process isolation checks failed.\n");
+            print_isolation_check_summary(check_results, check_index,
+                                          cgroups_required);
+        }
         jsonl_write_end(false);
         report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
                       log_path, jsonl_path);
@@ -2211,6 +2244,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     }
     terminal_number = 0;
     for (size_t i = 0; i < config->terminal_count; ++i) {
+        if (stop_signal != 0) break;
         if (!terminal_is_selected(&config->terminals[i], selection)) continue;
         terminal_number++;
         report_styled(color_cyan, "[%zu/%zu] %s\n",
@@ -2230,6 +2264,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
             }
             captured_stream_free(&warmup_output.stdout_output);
             captured_stream_free(&warmup_output.stderr_output);
+            if (stop_signal != 0) break;
             if (!warmup_ok) {
                 all_ok = false;
                 report_styled(color_red, "  Failed: Warmup\n");
@@ -2241,6 +2276,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                     executable_path, &summaries);
                 if (!startup_ok) all_ok = false;
             }
+            if (stop_signal != 0) break;
 
             if (workload_count > 0) {
                 bool benchmark_ok = run_terminal(
@@ -2255,6 +2291,11 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         report_styled(NULL, "\n");
     }
 
+    if (stop_signal != 0) {
+        all_ok = false;
+        report_styled(color_yellow, "\nRun interrupted by signal %d.\n",
+                      (int)stop_signal);
+    }
     print_collective_summary(&summaries);
     if (jsonl_failed) all_ok = false;
     jsonl_write_end(all_ok);
@@ -2265,4 +2306,30 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     free(check_results);
     free(summaries.items);
     return finish_run_logs(all_ok, log_path, jsonl_path);
+}
+
+/* Keep cancellation active until terminals, cgroups, and run logs are closed. */
+int controller_run(const AppConfig *config, const RunSelection *selection,
+                   const char *executable_path) {
+    stop_signal = 0;
+    struct sigaction action = {.sa_handler = request_stop};
+    sigemptyset(&action.sa_mask);
+    size_t installed = 0;
+    for (; installed < sizeof(stop_signals) / sizeof(stop_signals[0]); ++installed) {
+        if (sigaction(stop_signals[installed], &action,
+                      &saved_stop_actions[installed]) != 0) break;
+    }
+    int result;
+    if (installed == sizeof(stop_signals) / sizeof(stop_signals[0])) {
+        result = run_controller(config, selection, executable_path);
+    } else {
+        fprintf(stderr, "te-stsuite: cannot install cancellation handler: %s\n",
+                strerror(errno));
+        result = 1;
+    }
+    while (installed > 0) {
+        --installed;
+        sigaction(stop_signals[installed], &saved_stop_actions[installed], NULL);
+    }
+    return stop_signal != 0 ? 128 + stop_signal : result;
 }
