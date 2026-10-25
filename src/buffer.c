@@ -91,29 +91,6 @@ bool buffer_appendf(Buffer *buffer, const char *format, ...) {
     return true;
 }
 
-/* Append a binary fixture without treating its contents as a C string. */
-bool buffer_load_file(Buffer *buffer, const char *path) {
-    FILE *file = fopen(path, "rb");
-    if (file == NULL) {
-        return false;
-    }
-
-    unsigned char chunk[16384];
-    size_t count;
-    bool ok = true;
-    while ((count = fread(chunk, 1, sizeof(chunk), file)) > 0) {
-        if (!buffer_append(buffer, chunk, count)) {
-            ok = false;
-            break;
-        }
-    }
-    if (ferror(file)) {
-        ok = false;
-    }
-    fclose(file);
-    return ok;
-}
-
 /* Repeat one generated sample enough times to match vtebench's size floor. */
 bool buffer_repeat_to_minimum(Buffer *buffer, size_t minimum) {
     if (buffer->length == 0) {

@@ -22,6 +22,23 @@ endif
 
 math = cc.find_library('m', required: true)
 
+python = import('python').find_installation('python3', required: true)
+embedded_benchmark_data = custom_target(
+  'embedded_benchmark_data',
+  input: files(
+    'data/unicode_symbols.txt',
+    'data/medium_cells.vim',
+    'data/sync_medium_cells.vim',
+  ),
+  output: 'embedded_benchmark_data.c',
+  command: [
+    python,
+    files('tools/embed_benchmark_data.py'),
+    '@INPUT@',
+    '@OUTPUT@',
+  ],
+)
+
 fs = import('fs')
 source_relative_to_build = fs.relative_to(
   meson.current_source_dir(),
@@ -53,7 +70,6 @@ sources = files(
   'src/main.c',
   'src/config.c',
   'src/buffer.c',
-  'src/data.c',
   'src/monitor.c',
   'src/monitors/polling.c',
   'src/monitors/cgroupv2.c',
@@ -79,7 +95,7 @@ sources = files(
   'vendor/yyjson/src/yyjson.c',
 )
 
-subdir('data')
+sources += embedded_benchmark_data
 
 executable(
   'te-stsuite',

@@ -87,6 +87,14 @@ typedef struct {
 extern const Benchmark te_stsuite_benchmarks[];
 extern const size_t te_stsuite_benchmark_count;
 
+/* Benchmark payloads generated from the source fixtures during the build. */
+extern const unsigned char te_stsuite_unicode_symbols[];
+extern const size_t te_stsuite_unicode_symbols_length;
+extern const unsigned char te_stsuite_medium_cells[];
+extern const size_t te_stsuite_medium_cells_length;
+extern const unsigned char te_stsuite_sync_medium_cells[];
+extern const size_t te_stsuite_sync_medium_cells_length;
+
 /* Buffer operations keep benchmark generation independent of the runner. */
 void buffer_init(Buffer *buffer);
 void buffer_free(Buffer *buffer);
@@ -94,9 +102,7 @@ bool buffer_append(Buffer *buffer, const void *data, size_t length);
 bool buffer_append_char(Buffer *buffer, unsigned char value);
 bool buffer_append_repeat(Buffer *buffer, unsigned char value, size_t count);
 bool buffer_appendf(Buffer *buffer, const char *format, ...);
-bool buffer_load_file(Buffer *buffer, const char *path);
 bool buffer_repeat_to_minimum(Buffer *buffer, size_t minimum);
-bool benchmark_data_path(char *path, size_t path_size, const char *filename);
 
 /* Configuration and execution entry points. */
 bool config_load(const char *path, AppConfig *config, char *error,
