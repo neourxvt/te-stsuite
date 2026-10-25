@@ -1119,8 +1119,11 @@ static_inline bool char_is_hex(u8 c) {
  bit mask       [x.......] (80)
  bit pattern    [0.......] (00)
  */
+/* ASCII sequence tables are only used by the JSON reader. */
+#if !YYJSON_DISABLE_READER
 utf8_seq_def(b1_mask, 80, 00, 00, 00)
 utf8_seq_def(b1_patt, 00, 00, 00, 00)
+#endif
 #define is_utf8_seq1(uni) ( \
     ((uni & utf8_seq(b1_mask)) == utf8_seq(b1_patt)) )
 
@@ -1191,6 +1194,8 @@ utf8_seq_def(b4_req2, 03, 30, 00, 00)
 
 #if !YYJSON_DISABLE_FAST_FP_CONV
 
+/* These power tables are only referenced by the floating-point reader. */
+#if !YYJSON_DISABLE_READER
 /** Maximum pow10 exponent that can be represented exactly as a float64. */
 #define F64_POW10_MAX_EXACT_EXP 22
 
@@ -1218,6 +1223,7 @@ static const u64 u64_pow10_table[U64_POW10_MAX_EXACT_EXP + 1] = {
     U64(0x002386F2, 0x6FC10000), U64(0x01634578, 0x5D8A0000),
     U64(0x0DE0B6B3, 0xA7640000), U64(0x8AC72304, 0x89E80000)
 };
+#endif /* !YYJSON_DISABLE_READER */
 
 /** Minimum decimal exponent in pow10_sig_table. */
 #define POW10_SIG_TABLE_MIN_EXP -343
