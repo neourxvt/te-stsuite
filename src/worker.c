@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "te-stsuite.h"
+#include "process_isolation.h"
 
 #include <errno.h>
 #include <math.h>
@@ -117,6 +118,31 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         return 1;
     }
 
+    /* Reapply taskset affinity after a terminal may have reset its child mask. */
+    if (config->process_isolation == PROCESS_ISOLATION_TASKSET &&
+        !process_isolation_pin_pid(getpid(), 0)) {
+        send_event(control_fd, "F cannot pin benchmark worker to CPU 0: %s\n",
+                   strerror(errno));
+        close(control_fd);
+        return 1;
+    }
+
+    bool checking_isolation = selection != NULL &&
+                              selection->phase == WORKER_PHASE_CHECK;
+    sigset_t check_ack_signal;
+    if (checking_isolation) {
+        /* Keep the check worker alive until the controller inspects its PID. */
+        sigemptyset(&check_ack_signal);
+        sigaddset(&check_ack_signal, SIGUSR1);
+        if (sigprocmask(SIG_BLOCK, &check_ack_signal, NULL) != 0) {
+            send_event(control_fd,
+                       "F cannot prepare process isolation check: %s\n",
+                       strerror(errno));
+            close(control_fd);
+            return 1;
+        }
+    }
+
     if (!isatty(STDOUT_FILENO)) {
         send_event(control_fd, "F benchmark worker stdout is not a terminal\n");
         close(control_fd);
@@ -137,6 +163,20 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
     if (selection != NULL &&
         (selection->phase == WORKER_PHASE_CHECK ||
          selection->phase == WORKER_PHASE_STARTUP)) {
+        if (checking_isolation) {
+            int received_signal = 0;
+            int wait_error;
+            do {
+                wait_error = sigwait(&check_ack_signal, &received_signal);
+            } while (wait_error == EINTR);
+            if (wait_error != 0 || received_signal != SIGUSR1) {
+                send_event(control_fd,
+                           "F process isolation check acknowledgement failed: %s\n",
+                           strerror(wait_error == 0 ? EIO : wait_error));
+                close(control_fd);
+                return 1;
+            }
+        }
         send_event(control_fd, "D\n");
         close(control_fd);
         return 0;

@@ -54,7 +54,8 @@ typedef struct {
     bool recorded;
     bool passed;
     bool worker_moved;
-} CgroupCheckResult;
+    bool cgroups_used;
+} IsolationCheckResult;
 
 static FILE *log_file;
 static FILE *jsonl_file;
@@ -693,7 +694,7 @@ static void jsonl_write_run(const AppConfig *config, const char *started_at) {
     yyjson_mut_doc *doc = jsonl_new_object(&object);
     if (doc == NULL) return;
     bool ok = yyjson_mut_obj_add_str(doc, object, "type", "run") &&
-              yyjson_mut_obj_add_uint(doc, object, "schema", 2) &&
+              yyjson_mut_obj_add_uint(doc, object, "schema", 3) &&
               yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
               yyjson_mut_obj_add_str(doc, object, "config", config->path) &&
               yyjson_mut_obj_add_str(doc, object, "monitor",
@@ -767,11 +768,12 @@ static void jsonl_write_result(const Summary *summary) {
     if (jsonl_write_doc(doc, object)) ++jsonl_result_count;
 }
 
-/* Record the automatic cgroup placement check without creating a result row. */
-static void jsonl_write_cgroup_check(const char *terminal,
-                                     MonitorIsolation isolation,
-                                     const char *detail,
-                                     bool worker_moved) {
+/* Record process placement without creating a benchmark result row. */
+static void jsonl_write_isolation_check(const char *terminal,
+                                        MonitorIsolation isolation,
+                                        const char *detail,
+                                        bool cgroups_used,
+                                        bool worker_moved) {
     yyjson_mut_val *object = NULL;
     yyjson_mut_doc *doc = jsonl_new_object(&object);
     if (doc == NULL) return;
@@ -780,9 +782,12 @@ static void jsonl_write_cgroup_check(const char *terminal,
                              : isolation == MONITOR_ISOLATION_OUTSIDE
                                    ? "outside"
                                    : "unavailable";
-    bool ok = yyjson_mut_obj_add_str(doc, object, "type", "cgroup_check") &&
+    bool ok = yyjson_mut_obj_add_str(doc, object, "type",
+                                     "process_isolation_check") &&
               yyjson_mut_obj_add_str(doc, object, "terminal", terminal) &&
               yyjson_mut_obj_add_str(doc, object, "status", status) &&
+              yyjson_mut_obj_add_bool(doc, object, "cgroups_used",
+                                      cgroups_used) &&
               yyjson_mut_obj_add_bool(doc, object, "worker_moved", worker_moved);
     if (ok) {
         ok = detail == NULL
@@ -799,7 +804,7 @@ static void jsonl_write_cgroup_check(const char *terminal,
 }
 
 /* Return a short human-facing status label for the failure summary. */
-static const char *cgroup_check_status(MonitorIsolation isolation) {
+static const char *isolation_check_status(MonitorIsolation isolation) {
     switch (isolation) {
         case MONITOR_ISOLATION_INSIDE: return "passed";
         case MONITOR_ISOLATION_OUTSIDE: return "outside";
@@ -809,14 +814,15 @@ static const char *cgroup_check_status(MonitorIsolation isolation) {
 }
 
 /* Show all selected terminals together when isolation prevents the run. */
-static void print_cgroup_check_summary(const CgroupCheckResult *results,
-                                      size_t count) {
+static void print_isolation_check_summary(const IsolationCheckResult *results,
+                                         size_t count,
+                                         bool cgroups_required) {
     size_t terminal_width = strlen("Terminal");
     for (size_t i = 0; i < count; ++i) {
         size_t length = strlen(results[i].terminal);
         if (length > terminal_width) terminal_width = length;
     }
-    report_styled(color_bold_cyan, "\nCgroup check summary\n");
+    report_styled(color_bold_cyan, "\nProcess isolation check summary\n");
     report("%-*s  %-12s  %s\n", (int)terminal_width, "Terminal",
            "Status", "Detail");
     for (size_t i = 0; i < terminal_width + 2 + 12 + 2 + 6; ++i) {
@@ -824,17 +830,19 @@ static void print_cgroup_check_summary(const CgroupCheckResult *results,
     }
     report("\n");
     for (size_t i = 0; i < count; ++i) {
-        const CgroupCheckResult *result = &results[i];
+        const IsolationCheckResult *result = &results[i];
         const char *color = result->passed ? color_green : color_red;
         report_styled(color, "%-*s  %-12s  %s\n",
                       (int)terminal_width, result->terminal,
-                      cgroup_check_status(result->isolation),
+                      isolation_check_status(result->isolation),
                       result->detail[0] == '\0' ? "check did not complete"
                                                  : result->detail);
     }
-    report("\nRun te-stsuite inside a writable cgroup v2 subtree delegated by\n");
-    report("the system or container manager. Do not change permissions on\n");
-    report("/sys/fs/cgroup itself.\n");
+    if (cgroups_required) {
+        report("\nRun te-stsuite inside a writable cgroup v2 subtree delegated by\n");
+        report("the system or container manager. Do not change permissions on\n");
+        report("/sys/fs/cgroup itself.\n");
+    }
 }
 
 /* Mark the end of a run with success and the number of result rows emitted. */
@@ -1012,7 +1020,7 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                          char *active_benchmark, size_t *active_bytes,
                          bool *active, bool *ready, bool *done,
                          bool *worker_failed, bool include_startup,
-                         CgroupCheckResult *check_result, WorkerPhase phase,
+                         IsolationCheckResult *check_result, WorkerPhase phase,
                          uint64_t launch_ns,
                          StartupSample *startup_sample) {
     if (line[0] == 'R' && line[1] == ' ') {
@@ -1027,6 +1035,16 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
             MonitorIsolation isolation = monitor_check_isolation(
                 monitor, (pid_t)terminal_pid, (pid_t)worker_pid,
                 worker_moved != 0, &detail);
+            char acknowledgement_error[256] = {0};
+            /* Let the worker exit only after PID-based checks have completed. */
+            bool acknowledged = kill((pid_t)worker_pid, SIGUSR1) == 0;
+            if (!acknowledged) {
+                snprintf(acknowledgement_error, sizeof(acknowledgement_error),
+                         "cannot release process isolation check worker: %s",
+                         strerror(errno));
+                isolation = MONITOR_ISOLATION_UNAVAILABLE;
+                detail = acknowledgement_error;
+            }
             if (check_result != NULL) {
                 check_result->isolation = isolation;
                 check_result->recorded = true;
@@ -1037,15 +1055,22 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                                                : detail);
             }
             if (isolation == MONITOR_ISOLATION_INSIDE) {
-                report_styled(color_green, "  Cgroup check: passed (%s)\n",
+                report_styled(color_green,
+                              "  Process isolation check: passed (%s)\n",
                               detail == NULL ? "ok" : detail);
             } else if (isolation == MONITOR_ISOLATION_OUTSIDE) {
-                report_styled(color_red, "  Cgroup check: outside (%s)\n",
+                report_styled(color_red,
+                              "  Process isolation check: outside (%s)\n",
                               detail == NULL ? "placement failed" : detail);
             } else {
                 report_styled(color_yellow,
-                              "  Cgroup check: unavailable (%s)\n",
+                              "  Process isolation check: unavailable (%s)\n",
                               detail == NULL ? monitor_scope_error(monitor) : detail);
+            }
+            if (!acknowledged) {
+                *worker_failed = true;
+                *done = true;
+                return true;
             }
         }
         if (phase == WORKER_PHASE_STARTUP) {
@@ -1115,6 +1140,13 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
     }
     if (line[0] == 'F' && line[1] == ' ') {
         report_styled(color_red, "  Worker error: %s\n", line + 2);
+        if (phase == WORKER_PHASE_CHECK && check_result != NULL) {
+            check_result->isolation = MONITOR_ISOLATION_OUTSIDE;
+            check_result->recorded = true;
+            check_result->passed = false;
+            snprintf(check_result->detail, sizeof(check_result->detail),
+                     "%s", line + 2);
+        }
         *worker_failed = true;
         *done = true;
         return true;
@@ -1133,7 +1165,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                         const char *executable_path,
                         WorkerPhase phase,
                         SummaryList *summaries,
-                        CgroupCheckResult *check_result,
+                        IsolationCheckResult *check_result,
                         bool include_startup,
                         StartupSample *startup_sample) {
     if (startup_sample != NULL) {
@@ -1165,9 +1197,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         cleanup_terminal_files(config_path, xresources_path);
         return false;
     }
-    MonitorBackend backend = phase == WORKER_PHASE_CHECK
-                                 ? MONITOR_BACKEND_CGROUPV2
-                                 : config->monitor_backend;
+    MonitorBackend backend = config->monitor_backend;
     Monitor *monitor = monitor_create(backend, config->process_isolation);
     if (monitor == NULL) {
         report_styled(color_red,
@@ -1643,12 +1673,15 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
             selected_terminal_count++;
         }
     }
-    CgroupCheckResult *check_results =
+    bool cgroups_required =
+        config->monitor_backend == MONITOR_BACKEND_CGROUPV2 ||
+        config->process_isolation == PROCESS_ISOLATION_CGROUPV2;
+    IsolationCheckResult *check_results =
         calloc(selected_terminal_count == 0 ? 1 : selected_terminal_count,
                sizeof(*check_results));
     if (check_results == NULL) {
         report_styled(color_red,
-                      "te-stsuite: cannot allocate cgroup check results\n");
+                      "te-stsuite: cannot allocate process isolation check results\n");
         jsonl_write_end(false);
         report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
                       log_path, jsonl_path);
@@ -1662,9 +1695,10 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     for (size_t i = 0; i < config->terminal_count; ++i) {
         if (!terminal_is_selected(&config->terminals[i], selection)) continue;
         terminal_number++;
-        CgroupCheckResult *result = &check_results[check_index++];
+        IsolationCheckResult *result = &check_results[check_index++];
         result->terminal = config->terminals[i].name;
         result->isolation = MONITOR_ISOLATION_UNAVAILABLE;
+        result->cgroups_used = cgroups_required;
         snprintf(result->detail, sizeof(result->detail),
                  "check did not complete; see the terminal error above");
         report_styled(color_cyan, "[%zu/%zu] %s\n", terminal_number,
@@ -1681,18 +1715,20 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
             snprintf(result->detail, sizeof(result->detail),
                      "terminal or worker exited before the check completed");
         }
-        jsonl_write_cgroup_check(result->terminal, result->isolation,
-                                 result->detail, result->worker_moved);
+        jsonl_write_isolation_check(result->terminal, result->isolation,
+                                    result->detail, result->cgroups_used,
+                                    result->worker_moved);
         report_styled(ok ? color_green : color_red,
-                      "  %s: Cgroup check\n\n",
+                      "  %s: Process isolation check\n\n",
                       ok ? "Finished" : "Failed");
         if (!result->passed) checks_passed = false;
     }
 
     if (!checks_passed) {
         report_styled(color_red,
-                      "\nBenchmark run stopped before warmup because cgroup checks failed.\n");
-        print_cgroup_check_summary(check_results, check_index);
+                      "\nBenchmark run stopped before warmup because process isolation checks failed.\n");
+        print_isolation_check_summary(check_results, check_index,
+                                      cgroups_required);
         jsonl_write_end(false);
         report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
                       log_path, jsonl_path);

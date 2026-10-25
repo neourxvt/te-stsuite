@@ -73,6 +73,8 @@ sources = files(
   'src/monitor.c',
   'src/monitors/polling.c',
   'src/monitors/cgroupv2.c',
+  'src/process_isolations/taskset.c',
+  'src/process_isolations/cgroupv2.c',
   'src/worker.c',
   'src/process_isolation.c',
   'src/controller.c',

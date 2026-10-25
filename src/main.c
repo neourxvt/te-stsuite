@@ -17,8 +17,8 @@ typedef struct {
 static void print_usage(const char *program) {
     printf("Usage: %s [CONFIG.toml] [OPTIONS]\n\n", program);
     printf("Runs terminal emulator benchmarks on modern Linux from named TOML entries.\n");
-    printf("It checks cgroup placement and CPU isolation, then warms and benchmarks\n");
-    printf("each selected terminal on one available isolated CPU. The TOML selects\n");
+    printf("It checks process placement, then warms and benchmarks each selected\n");
+    printf("terminal on one available isolated CPU. The TOML selects\n");
     printf("cgroup v2 accounting or /proc process-tree polling. Both sample CPU and\n");
     printf("memory per interval and record PTY write times. Results are printed per\n");
     printf("benchmark, summarized per terminal and collectively, and saved as\n");
@@ -31,6 +31,7 @@ static void print_usage(const char *program) {
     printf("  -b, --benchmark NAME     Run only this workload; repeat to select more\n\n");
     printf("TOML monitor defaults to cgroupv2; choose \"polling\" to use /proc.\n");
     printf("TOML process_isolation defaults to cgroupv2; choose \"taskset\" for CPU affinity.\n");
+    printf("Use polling with taskset to run without cgroups.\n");
     printf("Process placement checks run before warmup and measurement.\n\n");
     printf("A terminal name selects all its config variants; a name such as\n");
     printf("kitty/compact selects one variant. Workloads:\n");

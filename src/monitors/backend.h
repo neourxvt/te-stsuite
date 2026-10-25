@@ -18,7 +18,7 @@ typedef struct {
 const MonitorBackendOps *polling_monitor_ops(void);
 const MonitorBackendOps *cgroupv2_monitor_ops(void);
 
-/* A scope is shared with the cgroup backend even when polling is selected. */
+/* Polling can run without a scope; cgroup accounting and isolation need one. */
 CgroupScope *cgroup_scope_create(ProcessIsolationMode process_isolation);
 void cgroup_scope_destroy(CgroupScope *scope);
 bool cgroup_scope_attach_terminal(CgroupScope *scope, pid_t terminal_pid);

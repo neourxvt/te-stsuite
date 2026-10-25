@@ -116,16 +116,21 @@ logical CPU from scheduler load balancing and unbound workqueues; it does not
 move interrupts or isolate SMT sibling threads. In `taskset` mode, the terminal
 and worker are pinned to CPU 0 using scheduler affinity. CPU 0 must be available
 to the process, and this mode does not reserve that CPU from other workloads.
-Both modes use cgroups to separate terminal and worker accounting. Avoid
-terminal commands that attach to an already-running daemon, since the new
-process must own the measured PTY session.
+With `monitor = "polling"`, taskset mode runs without cgroups. The cgroupv2
+monitor still requires cgroups for resource accounting. Avoid terminal
+commands that attach to an already-running daemon, since the new process must
+own the measured PTY session.
+
+To run without cgroups, configure both `monitor = "polling"` and
+`process_isolation = "taskset"`.
 
 ## Measurements
 
-Before measuring, te-stsuite checks whether each terminal and its worker are
-placed in separate cgroups and verifies the selected process isolation mode.
-It then launches every selected terminal once for a separate warmup phase. It
-uses the same configured command for checks, warmup, and measured runs. In
+Before measuring, te-stsuite verifies the selected process isolation mode. When
+cgroups are in use, it also checks that each terminal and its worker are placed
+in separate accounting cgroups. It then launches every selected terminal once
+for a separate warmup phase. It uses the same configured command for checks,
+warmup, and measured runs. In
 `cgroupv2` mode, the worker runs on the remaining CPUs outside the isolated
 partition. Its resource use does not count toward the terminal.
 
@@ -135,11 +140,11 @@ and memory from `memory.current` and `memory.peak`; memory includes charged cach
 and other cgroup memory, not only process RSS. The `polling` backend uses the
 `/proc` process-tree sampler and reports summed RSS. Both backends report CPU as
 a percentage of one core and memory as time-weighted average and peak MiB. Each
-startup and workload result has its own interval. If cgroup delegation is
-unavailable, the check fails and the run stops before warmup. `cgroupv2`
-process isolation additionally requires cpuset partition support. Missing
-resource counters are recorded as null; te-stsuite does not turn missing
-counter values into zero or silently switch backends.
+startup and workload result has its own interval. The cgroupv2 monitor and
+cgroupv2 process isolation require a writable delegated cgroup v2 subtree;
+cgroupv2 process isolation additionally requires cpuset partition support.
+Missing resource counters are recorded as null; te-stsuite does not turn
+missing counter values into zero or silently switch backends.
 
 The startup benchmark launches the configured terminal repeatedly and measures
 from each launch until the in-terminal worker is ready. It gathers at least ten
@@ -156,17 +161,20 @@ all terminals finish. Matching logs are created in the current working
 directory as `.log.te-stsuite-YYYYMMDD-HHMMSS.log` and
 `.log.te-stsuite-YYYYMMDD-HHMMSS.jsonl`.
 
-The JSONL file is compact and contains run metadata, one cgroup check record per
-terminal, one flat result record per measured terminal and benchmark, and one
-end record. Results are not duplicated for printed summaries. The schema
-version is 2. Durations use seconds or milliseconds as named, memory uses
+The JSONL file is compact and contains run metadata, one process isolation
+check record per terminal, one flat result record per measured terminal and
+benchmark, and one end record. Results are not duplicated for printed
+summaries. The schema version is 3. Durations use seconds or milliseconds as
+named, memory uses
 bytes, and `cpu_pct` is percent of one core. Missing resource measurements are
 JSON null. Workload results also include payload size and write-time statistics;
-partial results are marked with `"complete":false`.
+partial results are marked with `"complete":false`. A check record's
+`cgroups_used` field indicates whether cgroup scopes were used, and
+`worker_moved` indicates whether the worker joined its separate cgroup.
 
 ```jsonl
-{"type":"run","schema":2,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
-{"type":"cgroup_check","terminal":"kitty/compact","status":"inside","worker_moved":true,"detail":"terminal isolated on CPU 2; worker is in its separate cgroup"}
+{"type":"run","schema":3,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
+{"type":"process_isolation_check","terminal":"kitty/compact","status":"passed","cgroups_used":true,"worker_moved":true,"detail":"terminal isolated on CPU 2; worker is in its separate cgroup"}
 {"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
 {"type":"end","status":"ok","results":1}
 ```

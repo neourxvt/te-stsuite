@@ -26,7 +26,7 @@ typedef struct {
     uint64_t peak_memory_bytes;
 } MonitorMetrics;
 
-/* Report whether the launched terminal and worker stayed in their scopes. */
+/* Report whether the launched terminal and worker met placement requirements. */
 typedef enum {
     MONITOR_ISOLATION_UNAVAILABLE,
     MONITOR_ISOLATION_INSIDE,
@@ -39,7 +39,7 @@ typedef struct Monitor Monitor;
 bool monitor_backend_parse(const char *name, MonitorBackend *backend);
 const char *monitor_backend_name(MonitorBackend backend);
 
-/* Create an accounting monitor and a scope using the selected CPU isolation. */
+/* Create resource monitoring and only the cgroup scope required by its modes. */
 Monitor *monitor_create(MonitorBackend backend,
                         ProcessIsolationMode process_isolation);
 void monitor_destroy(Monitor *monitor);
