@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -764,6 +765,140 @@ static size_t summary_column_width(const SummaryList *summaries, bool terminal) 
     return width;
 }
 
+/* Keep each numeric column's comparison independent of the other metrics. */
+typedef enum {
+    SUMMARY_WALL,
+    SUMMARY_CPU_PERCENT,
+    SUMMARY_CPU_TIME,
+    SUMMARY_MEMORY_AVERAGE,
+    SUMMARY_MEMORY_PEAK,
+    SUMMARY_MEAN,
+    SUMMARY_P90,
+    SUMMARY_STDDEV,
+    SUMMARY_SAMPLES,
+    SUMMARY_PAYLOAD,
+} SummaryMetric;
+
+/* Extract values in the displayed units, preserving missing resource data. */
+static bool summary_metric_value(const Summary *summary, SummaryMetric metric,
+                                 double *value) {
+    const MonitorMetrics *metrics = &summary->metrics;
+    if (metric >= SUMMARY_CPU_PERCENT && metric <= SUMMARY_MEMORY_PEAK &&
+        !metrics->resources_available) return false;
+    switch (metric) {
+        case SUMMARY_WALL: *value = metrics->wall_seconds * 1000.0; break;
+        case SUMMARY_CPU_PERCENT:
+            *value = metrics->wall_seconds > 0
+                         ? metrics->cpu_seconds / metrics->wall_seconds * 100.0
+                         : 0;
+            break;
+        case SUMMARY_CPU_TIME: *value = metrics->cpu_seconds * 1000.0; break;
+        case SUMMARY_MEMORY_AVERAGE:
+            *value = metrics->average_memory_bytes / 1048576.0;
+            break;
+        case SUMMARY_MEMORY_PEAK:
+            *value = (double)metrics->peak_memory_bytes / 1048576.0;
+            break;
+        case SUMMARY_MEAN: *value = summary->sample_mean_ms; break;
+        case SUMMARY_P90: *value = summary->sample_p90_ms; break;
+        case SUMMARY_STDDEV: *value = summary->sample_stddev_ms; break;
+        case SUMMARY_SAMPLES: *value = summary->samples; break;
+        case SUMMARY_PAYLOAD: *value = (double)summary->bytes; break;
+        default: return false;
+    }
+    return isfinite(*value);
+}
+
+/* Sort relative scores so the median can anchor the yellow midpoint. */
+static int compare_summary_values(const void *left, const void *right) {
+    double first = *(const double *)left;
+    double second = *(const double *)right;
+    return (first > second) - (first < second);
+}
+
+/* Compare completed runs of the same benchmark across terminal payload sizes. */
+static void summary_metric_color(const SummaryList *summaries,
+                                 const Summary *summary, SummaryMetric metric,
+                                 double value, char *color, size_t size) {
+    static const unsigned palette[] = {46, 82, 118, 154, 190, 226,
+                                       220, 214, 208, 202, 196};
+    unsigned index = 250;
+    if (summary->complete && summary->samples > 0 && metric != SUMMARY_PAYLOAD) {
+        double *values = malloc(summaries->count * sizeof(*values));
+        size_t value_count = 0;
+        double score = metric == SUMMARY_SAMPLES ? -value : value;
+        if (values != NULL) {
+            for (size_t i = 0; i < summaries->count; ++i) {
+                const Summary *other = &summaries->items[i];
+                double candidate;
+                if (!other->complete || other->samples == 0 ||
+                    strcmp(summary->benchmark, other->benchmark) != 0 ||
+                    !summary_metric_value(other, metric, &candidate)) continue;
+                /* Larger sample counts remain better by comparing their inverse. */
+                values[value_count++] = metric == SUMMARY_SAMPLES ? -candidate
+                                                                   : candidate;
+            }
+            if (value_count > 0) {
+                qsort(values, value_count, sizeof(*values), compare_summary_values);
+                double minimum = values[0];
+                double median = value_count % 2 == 0
+                                    ? values[value_count / 2 - 1] / 2.0 +
+                                          values[value_count / 2] / 2.0
+                                    : values[value_count / 2];
+                double red_threshold = median + (median - minimum);
+                size_t last = sizeof(palette) / sizeof(palette[0]) - 1;
+                if (minimum != values[value_count - 1]) {
+                    if (score == median) {
+                        index = palette[last / 2];
+                    } else if (score <= minimum) {
+                        index = palette[0];
+                    } else if (score >= red_threshold) {
+                        index = palette[last];
+                    } else {
+                        double position = score < median
+                                              ? (score - minimum) / (median - minimum)
+                                              : 0.5 + 0.5 * (score - median) /
+                                                    (red_threshold - median);
+                        index = palette[(size_t)(position * last + 0.5)];
+                    }
+                }
+            }
+            free(values);
+        }
+    }
+    snprintf(color, size, "\033[38;5;%um", index);
+}
+
+/* Style only a cell, leaving padding widths and the plain-text log intact. */
+static void print_summary_metric(const SummaryList *summaries,
+                                 const Summary *summary, SummaryMetric metric,
+                                 int width) {
+    double value;
+    if (!summary_metric_value(summary, metric, &value)) {
+        report("  %*s", width, "n/a");
+        return;
+    }
+    char color[24];
+    summary_metric_color(summaries, summary, metric, value, color, sizeof(color));
+    if (metric == SUMMARY_SAMPLES) {
+        report_styled(color, "  %*u", width, summary->samples);
+    } else if (metric == SUMMARY_PAYLOAD) {
+        report_styled(color, "  %*zu", width, summary->bytes);
+    } else {
+        report_styled(color, "  %*.2f", width, value);
+    }
+}
+
+/* Share the timing columns across startup, typing latency, and PTY writes. */
+static void print_summary_timings(const SummaryList *summaries,
+                                  const Summary *summary) {
+    print_summary_metric(summaries, summary, SUMMARY_MEAN, 12);
+    print_summary_metric(summaries, summary, SUMMARY_P90, 12);
+    print_summary_metric(summaries, summary, SUMMARY_STDDEV, 12);
+    print_summary_metric(summaries, summary, SUMMARY_SAMPLES, 9);
+    report("\n");
+}
+
 /* Print aligned resource and PTY timing tables for all collected results. */
 static void print_collective_summary(const SummaryList *summaries) {
     size_t terminal_width = summary_column_width(summaries, true);
@@ -781,6 +916,8 @@ static void print_collective_summary(const SummaryList *summaries) {
     }
 
     report_styled(color_bold_cyan, "Collective results\n");
+    report("Colors compare matching workloads within each column: green = better, red = worse.\n"
+           "Lower is better except N/Samples; gray = no spread, partial, or payload size.\n\n");
     size_t resource_width = terminal_width + benchmark_width + 2 * 8 + 10 + 9 +
                             10 + 15 + 15 + 7 + 9;
     report_styled(color_bold_cyan,
@@ -791,30 +928,16 @@ static void print_collective_summary(const SummaryList *summaries) {
     print_table_rule(resource_width);
     for (size_t i = 0; i < summaries->count; ++i) {
         const Summary *summary = &summaries->items[i];
-        double cpu_percent = summary->metrics.wall_seconds > 0
-                                 ? summary->metrics.cpu_seconds /
-                                       summary->metrics.wall_seconds * 100.0
-                                 : 0;
-        if (summary->metrics.resources_available) {
-            report_styled(summary->complete ? color_green : color_yellow,
-                          "%-*s  %-*s  %10.2f  %9.2f  %10.2f  %15.2f  %15.2f  %7u  %9s\n",
-                          (int)terminal_width, summary->terminal,
-                          (int)benchmark_width, summary->benchmark,
-                          summary->metrics.wall_seconds * 1000.0, cpu_percent,
-                          summary->metrics.cpu_seconds * 1000.0,
-                          summary->metrics.average_memory_bytes / 1048576.0,
-                          (double)summary->metrics.peak_memory_bytes / 1048576.0,
-                          summary->samples,
-                          summary->complete ? "complete" : "partial");
-        } else {
-            report_styled(summary->complete ? color_yellow : color_red,
-                          "%-*s  %-*s  %10.2f  %9s  %10s  %15s  %15s  %7u  %9s\n",
-                          (int)terminal_width, summary->terminal,
-                          (int)benchmark_width, summary->benchmark,
-                          summary->metrics.wall_seconds * 1000.0, "n/a", "n/a",
-                          "n/a", "n/a", summary->samples,
-                          summary->complete ? "complete" : "partial");
-        }
+        report("%-*s  %-*s", (int)terminal_width, summary->terminal,
+               (int)benchmark_width, summary->benchmark);
+        print_summary_metric(summaries, summary, SUMMARY_WALL, 10);
+        print_summary_metric(summaries, summary, SUMMARY_CPU_PERCENT, 9);
+        print_summary_metric(summaries, summary, SUMMARY_CPU_TIME, 10);
+        print_summary_metric(summaries, summary, SUMMARY_MEMORY_AVERAGE, 15);
+        print_summary_metric(summaries, summary, SUMMARY_MEMORY_PEAK, 15);
+        print_summary_metric(summaries, summary, SUMMARY_SAMPLES, 7);
+        report_styled(summary->complete ? color_green : color_yellow,
+                      "  %9s\n", summary->complete ? "complete" : "partial");
     }
 
     if (has_startup_results) {
@@ -831,12 +954,9 @@ static void print_collective_summary(const SummaryList *summaries) {
         for (size_t i = 0; i < summaries->count; ++i) {
             const Summary *summary = &summaries->items[i];
             if (strcmp(summary->benchmark, "startup") != 0) continue;
-            report_styled(summary->complete ? color_green : color_yellow,
-                          "%-*s  %-*s  %12.2f  %12.2f  %12.2f  %9u\n",
-                          (int)terminal_width, summary->terminal,
-                          (int)benchmark_width, summary->benchmark,
-                          summary->sample_mean_ms, summary->sample_p90_ms,
-                          summary->sample_stddev_ms, summary->samples);
+            report("%-*s  %-*s", (int)terminal_width, summary->terminal,
+                   (int)benchmark_width, summary->benchmark);
+            print_summary_timings(summaries, summary);
         }
     }
 
@@ -851,12 +971,9 @@ static void print_collective_summary(const SummaryList *summaries) {
         for (size_t i = 0; i < summaries->count; ++i) {
             const Summary *summary = &summaries->items[i];
             if (strcmp(summary->benchmark, "typometer") != 0 || summary->samples == 0) continue;
-            report_styled(summary->complete ? color_green : color_yellow,
-                          "%-*s  %-*s  %12.2f  %12.2f  %12.2f  %9u\n",
-                          (int)terminal_width, summary->terminal,
-                          (int)benchmark_width, summary->benchmark,
-                          summary->sample_mean_ms, summary->sample_p90_ms,
-                          summary->sample_stddev_ms, summary->samples);
+            report("%-*s  %-*s", (int)terminal_width, summary->terminal,
+                   (int)benchmark_width, summary->benchmark);
+            print_summary_timings(summaries, summary);
         }
     }
 
@@ -874,13 +991,10 @@ static void print_collective_summary(const SummaryList *summaries) {
         for (size_t i = 0; i < summaries->count; ++i) {
             const Summary *summary = &summaries->items[i];
             if (summary->bytes == 0) continue;
-            report_styled(summary->complete ? color_green : color_yellow,
-                          "%-*s  %-*s  %13zu  %12.2f  %12.2f  %12.2f  %9u\n",
-                          (int)terminal_width, summary->terminal,
-                          (int)benchmark_width, summary->benchmark,
-                          summary->bytes, summary->sample_mean_ms,
-                          summary->sample_p90_ms, summary->sample_stddev_ms,
-                          summary->samples);
+            report("%-*s  %-*s", (int)terminal_width, summary->terminal,
+                   (int)benchmark_width, summary->benchmark);
+            print_summary_metric(summaries, summary, SUMMARY_PAYLOAD, 13);
+            print_summary_timings(summaries, summary);
         }
     }
 }
