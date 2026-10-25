@@ -132,6 +132,18 @@ bool selection_includes_benchmark(const RunSelection *selection,
     return false;
 }
 
+/* Count selected workloads so warmup is skipped when no measurement will run. */
+static size_t selected_benchmark_count(const RunSelection *selection) {
+    size_t count = 0;
+    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
+        if (selection_includes_benchmark(selection,
+                                         te_stsuite_benchmarks[i].name)) {
+            count++;
+        }
+    }
+    return count;
+}
+
 /* Keep terminal styling out of the plain-text log while sharing formatting. */
 static void vreport(const char *color, const char *format, va_list args) {
     if (color_enabled && color != NULL) fputs(color, stdout);
@@ -1376,38 +1388,44 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     }
 
     bool all_ok = true;
-    const WorkerPhase phases[] = {
-        WORKER_PHASE_WARMUP,
-        WORKER_PHASE_BENCHMARK,
-    };
-    const char *const phase_titles[] = {"Warmup", "Benchmarks"};
-    for (size_t phase_index = 0;
-         phase_index < sizeof(phases) / sizeof(phases[0]); ++phase_index) {
-        report_styled(color_bold_cyan, "%s\n", phase_titles[phase_index]);
-        terminal_number = 0;
-        for (size_t i = 0; i < config->terminal_count; ++i) {
-            if (!terminal_is_selected(&config->terminals[i], selection)) continue;
-            terminal_number++;
-            report_styled(color_cyan, "[%zu/%zu] %s\n",
-                          terminal_number, selected_terminal_count,
-                          config->terminals[i].name);
+    size_t benchmark_count = selected_benchmark_count(selection);
+    if (benchmark_count == 0) {
+        report_styled(color_bold_cyan,
+                      "No benchmarks selected; skipping warmup and measurement.\n");
+    } else {
+        report_styled(color_bold_cyan, "Warmup and benchmarks\n");
+    }
+    terminal_number = 0;
+    for (size_t i = 0; i < config->terminal_count; ++i) {
+        if (!terminal_is_selected(&config->terminals[i], selection)) continue;
+        terminal_number++;
+        report_styled(color_cyan, "[%zu/%zu] %s\n",
+                      terminal_number, selected_terminal_count,
+                      config->terminals[i].name);
+        if (benchmark_count > 0) {
+            report_styled(color_dim, "  Warmup\n");
+            bool warmup_ok = run_terminal(&config->terminals[i], config,
+                                          selection, executable_path,
+                                          WORKER_PHASE_WARMUP, &summaries,
+                                          NULL);
+            if (!warmup_ok) all_ok = false;
+            report_styled(warmup_ok ? color_green : color_red,
+                          "  %s: Warmup\n", warmup_ok ? "Finished" : "Failed");
+
+            report_styled(color_dim, "  Benchmarks\n");
             size_t before = summaries.count;
-            bool ok = run_terminal(&config->terminals[i], config, selection,
-                                   executable_path, phases[phase_index],
-                                   &summaries, NULL);
-            if (!ok) all_ok = false;
+            bool benchmark_ok = run_terminal(&config->terminals[i], config,
+                                             selection, executable_path,
+                                             WORKER_PHASE_BENCHMARK,
+                                             &summaries, NULL);
+            if (!benchmark_ok) all_ok = false;
             size_t collected = summaries.count - before;
-            if (phase_index == 1) {
-                report_styled(ok ? color_green : color_red,
-                              "  %s: %zu benchmark result%s\n\n",
-                              ok ? "Finished" : "Failed", collected,
-                              collected == 1 ? "" : "s");
-            } else {
-                report_styled(ok ? color_green : color_red,
-                              "  %s: Warmup\n\n",
-                              ok ? "Finished" : "Failed");
-            }
+            report_styled(benchmark_ok ? color_green : color_red,
+                          "  %s: %zu benchmark result%s\n",
+                          benchmark_ok ? "Finished" : "Failed", collected,
+                          collected == 1 ? "" : "s");
         }
+        report_styled(NULL, "\n");
     }
 
     print_collective_summary(&summaries);

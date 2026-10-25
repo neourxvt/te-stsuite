@@ -16,8 +16,8 @@ typedef struct {
 static void print_usage(const char *program) {
     printf("Usage: %s CONFIG.toml [OPTIONS]\n\n", program);
     printf("Runs terminal emulator benchmarks on modern Linux from named TOML entries.\n");
-    printf("It first checks cgroup placement, warms each terminal, then benchmarks\n");
-    printf("selected terminals one at a time with the terminal pinned to CPU 0. The\n");
+    printf("It checks cgroup placement, then warms and benchmarks each selected\n");
+    printf("terminal before moving to the next, with it pinned to CPU 0. The\n");
     printf("TOML selects cgroup v2 accounting or /proc process-tree polling. Both\n");
     printf("sample CPU and memory per interval and record PTY write times. Results are\n");
     printf("printed per benchmark, summarized per terminal and collectively, and\n");
