@@ -826,7 +826,6 @@ static void summary_metric_color(const SummaryList *summaries,
     if (summary->complete && summary->samples > 0 && metric != SUMMARY_PAYLOAD) {
         double *values = malloc(summaries->count * sizeof(*values));
         size_t value_count = 0;
-        double score = metric == SUMMARY_SAMPLES ? -value : value;
         if (values != NULL) {
             for (size_t i = 0; i < summaries->count; ++i) {
                 const Summary *other = &summaries->items[i];
@@ -834,9 +833,7 @@ static void summary_metric_color(const SummaryList *summaries,
                 if (!other->complete || other->samples == 0 ||
                     strcmp(summary->benchmark, other->benchmark) != 0 ||
                     !summary_metric_value(other, metric, &candidate)) continue;
-                /* Larger sample counts remain better by comparing their inverse. */
-                values[value_count++] = metric == SUMMARY_SAMPLES ? -candidate
-                                                                   : candidate;
+                values[value_count++] = candidate;
             }
             if (value_count > 0) {
                 qsort(values, value_count, sizeof(*values), compare_summary_values);
@@ -848,16 +845,16 @@ static void summary_metric_color(const SummaryList *summaries,
                 double red_threshold = median + (median - minimum);
                 size_t last = sizeof(palette) / sizeof(palette[0]) - 1;
                 if (minimum != values[value_count - 1]) {
-                    if (score == median) {
+                    if (value == median) {
                         index = palette[last / 2];
-                    } else if (score <= minimum) {
+                    } else if (value <= minimum) {
                         index = palette[0];
-                    } else if (score >= red_threshold) {
+                    } else if (value >= red_threshold) {
                         index = palette[last];
                     } else {
-                        double position = score < median
-                                              ? (score - minimum) / (median - minimum)
-                                              : 0.5 + 0.5 * (score - median) /
+                        double position = value < median
+                                              ? (value - minimum) / (median - minimum)
+                                              : 0.5 + 0.5 * (value - median) /
                                                     (red_threshold - median);
                         index = palette[(size_t)(position * last + 0.5)];
                     }
@@ -873,6 +870,11 @@ static void summary_metric_color(const SummaryList *summaries,
 static void print_summary_metric(const SummaryList *summaries,
                                  const Summary *summary, SummaryMetric metric,
                                  int width) {
+    /* Sample counts provide context rather than a performance comparison. */
+    if (metric == SUMMARY_SAMPLES) {
+        report("  %*u", width, summary->samples);
+        return;
+    }
     double value;
     if (!summary_metric_value(summary, metric, &value)) {
         report("  %*s", width, "n/a");
@@ -880,9 +882,7 @@ static void print_summary_metric(const SummaryList *summaries,
     }
     char color[24];
     summary_metric_color(summaries, summary, metric, value, color, sizeof(color));
-    if (metric == SUMMARY_SAMPLES) {
-        report_styled(color, "  %*u", width, summary->samples);
-    } else if (metric == SUMMARY_PAYLOAD) {
+    if (metric == SUMMARY_PAYLOAD) {
         report_styled(color, "  %*zu", width, summary->bytes);
     } else {
         report_styled(color, "  %*.2f", width, value);
@@ -917,7 +917,7 @@ static void print_collective_summary(const SummaryList *summaries) {
 
     report_styled(color_bold_cyan, "Collective results\n");
     report("Colors compare matching workloads within each column: green = better, red = worse.\n"
-           "Lower is better except N/Samples; gray = no spread, partial, or payload size.\n\n");
+           "Lower is better; N/Samples are uncolored; gray = no spread, partial, or payload size.\n\n");
     size_t resource_width = terminal_width + benchmark_width + 2 * 8 + 10 + 9 +
                             10 + 15 + 15 + 7 + 9;
     report_styled(color_bold_cyan,
