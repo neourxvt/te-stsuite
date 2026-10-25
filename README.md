@@ -73,8 +73,8 @@ selects just that variant. Benchmark names are listed by `--help`.
 
 ```sh
 ./build/te-stsuite example.toml --terminal kitty --terminal xterm
-./build/te-stsuite example.toml --benchmark startup --benchmark vtebench-unicode
-./build/te-stsuite example.toml --terminal kitty --benchmark vtebench-scrolling
+./build/te-stsuite example.toml --benchmark startup --benchmark vtebench_unicode
+./build/te-stsuite example.toml --terminal kitty --benchmark vtebench_scrolling
 ```
 
 Each configured terminal launches sequentially. The `{CMD}` placeholder is
@@ -144,7 +144,7 @@ it does not extend `max_seconds`.
 
 ## Workloads
 
-The suite runs startup first, followed by the ported `vtebench-*` workloads:
+The suite runs startup first, followed by the ported `vtebench_*` workloads:
 cursor motion, dense cells, light cells, medium cells, scrolling, four
 scrolling-region workloads, scrolling fullscreen, synchronized medium cells,
 Unicode symbols, and missing glyphs.
