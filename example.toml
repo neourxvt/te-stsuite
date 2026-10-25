@@ -40,11 +40,11 @@ cmd = "/usr/bin/urxvt -e {CMD}"
 
 [xterm]
 cmd = "xterm -e {CMD}"
-# Optional per-run X resources, passed to the terminal through XENVIRONMENT.
-xresources = """
-xterm*faceName: monospace
-xterm*faceSize: 11
-"""
+
+# Optional X resources are written to a temporary file for this terminal run.
+[xterm.xresources]
+"xterm*faceName" = "monospace"
+"xterm*faceSize" = 11
 
 [ghostty]
 cmd = "ghostty -e {CMD}"

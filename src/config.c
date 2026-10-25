@@ -37,6 +37,96 @@ static bool read_option(toml_datum_t table, const char *key,
     return true;
 }
 
+/* Serialize a TOML resource table as one X resource specification per row. */
+static bool serialize_xresources(toml_datum_t table, char **content,
+                                 size_t *content_length, char *error,
+                                 size_t error_size) {
+    Buffer serialized;
+    buffer_init(&serialized);
+    for (int i = 0; i < table.u.tab.size; ++i) {
+        const char *key = table.u.tab.key[i];
+        int key_length = table.u.tab.len[i];
+        toml_datum_t value = table.u.tab.value[i];
+        char scalar[64];
+        const char *value_text = NULL;
+        size_t value_length = 0;
+
+        if (key == NULL || key_length <= 0 ||
+            memchr(key, '\0', (size_t)key_length) != NULL ||
+            memchr(key, ':', (size_t)key_length) != NULL ||
+            memchr(key, '\n', (size_t)key_length) != NULL ||
+            memchr(key, '\r', (size_t)key_length) != NULL) {
+            snprintf(error, error_size,
+                     "xresources keys must be nonempty resource names without colons or line breaks");
+            buffer_free(&serialized);
+            return false;
+        }
+
+        switch (value.type) {
+        case TOML_STRING:
+            if (value.u.str.ptr == NULL || value.u.str.len < 0 ||
+                memchr(value.u.str.ptr, '\0', (size_t)value.u.str.len) != NULL ||
+                memchr(value.u.str.ptr, '\n', (size_t)value.u.str.len) != NULL ||
+                memchr(value.u.str.ptr, '\r', (size_t)value.u.str.len) != NULL) {
+                snprintf(error, error_size,
+                         "xresources values must be single-line TOML scalars");
+                buffer_free(&serialized);
+                return false;
+            }
+            value_text = value.u.str.ptr;
+            value_length = (size_t)value.u.str.len;
+            break;
+        case TOML_INT64: {
+            int length = snprintf(scalar, sizeof(scalar), "%lld",
+                                  (long long)value.u.int64);
+            if (length < 0 || (size_t)length >= sizeof(scalar)) goto memory_error;
+            value_text = scalar;
+            value_length = (size_t)length;
+            break;
+        }
+        case TOML_FP64: {
+            int length = snprintf(scalar, sizeof(scalar), "%.17g",
+                                  value.u.fp64);
+            if (length < 0 || (size_t)length >= sizeof(scalar)) goto memory_error;
+            value_text = scalar;
+            value_length = (size_t)length;
+            break;
+        }
+        case TOML_BOOLEAN:
+            value_text = value.u.boolean ? "true" : "false";
+            value_length = value.u.boolean ? 4 : 5;
+            break;
+        default:
+            snprintf(error, error_size,
+                     "xresources values must be strings, integers, floats, or booleans");
+            buffer_free(&serialized);
+            return false;
+        }
+
+        if (!buffer_append(&serialized, key, (size_t)key_length) ||
+            !buffer_append(&serialized, ": ", 2) ||
+            !buffer_append(&serialized, value_text, value_length) ||
+            !buffer_append_char(&serialized, '\n')) {
+            goto memory_error;
+        }
+    }
+
+    *content = malloc(serialized.length + 1);
+    if (*content == NULL) goto memory_error;
+    if (serialized.length > 0) {
+        memcpy(*content, serialized.data, serialized.length);
+    }
+    (*content)[serialized.length] = '\0';
+    *content_length = serialized.length;
+    buffer_free(&serialized);
+    return true;
+
+memory_error:
+    snprintf(error, error_size, "out of memory while serializing xresources");
+    buffer_free(&serialized);
+    return false;
+}
+
 /* Release partially allocated configuration data after success or failure. */
 void config_free(AppConfig *config) {
     if (config == NULL) return;
@@ -64,11 +154,11 @@ static bool append_terminal(AppConfig *config, const char *name,
     char *xresources_copy = NULL;
     size_t xresources_length = 0;
 
-    if (xresources.type == TOML_STRING) {
-        xresources_copy = copy_toml_string(xresources);
-        if (xresources.u.str.len >= 0) {
-            xresources_length = (size_t)xresources.u.str.len;
-        }
+    if (xresources.type == TOML_TABLE &&
+        !serialize_xresources(xresources, &xresources_copy,
+                              &xresources_length, error, error_size)) {
+        free(command_copy);
+        return false;
     }
 
     if (has_variant) {
@@ -87,10 +177,9 @@ static bool append_terminal(AppConfig *config, const char *name,
     }
 
     if (command_copy == NULL || name_copy == NULL || command_copy[0] == '\0' ||
-        (has_variant && content_copy == NULL) ||
-        (xresources.type == TOML_STRING && xresources_copy == NULL)) {
+        (has_variant && content_copy == NULL)) {
         snprintf(error, error_size,
-                 "terminal '%s' needs a nonempty cmd, valid xresources, and each config variant needs a nonempty name and string content",
+                 "terminal '%s' needs a nonempty cmd and each config variant needs a nonempty name and string content",
                  name);
         free(command_copy);
         free(name_copy);
@@ -234,9 +323,9 @@ bool config_load(const char *path, AppConfig *config, char *error,
         toml_datum_t variants = toml_get(value, "configs");
         toml_datum_t xresources = toml_get(value, "xresources");
         if (xresources.type != TOML_UNKNOWN &&
-            xresources.type != TOML_STRING) {
+            xresources.type != TOML_TABLE) {
             snprintf(error, error_size,
-                     "terminal '%s' xresources must be a string", key);
+                     "terminal '%s' xresources must be a table", key);
             toml_free(result);
             config_free(config);
             return false;

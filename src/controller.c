@@ -855,7 +855,7 @@ static void jsonl_write_end(bool success) {
     jsonl_write_doc(doc, object);
 }
 
-/* Create exclusive, matching datetime-named text and JSONL files in CWD. */
+/* Create exclusive matching log files with the requested prefix in CWD. */
 static bool open_run_logs(char *log_path, size_t log_path_size,
                           char *jsonl_path, size_t jsonl_path_size,
                           char *started_at, size_t started_at_size,
@@ -876,9 +876,11 @@ static bool open_run_logs(char *log_path, size_t log_path_size,
         char suffix_text[16] = "";
         if (suffix > 0) snprintf(suffix_text, sizeof(suffix_text), "-%u", suffix);
         int log_length = snprintf(log_path, log_path_size,
-                                  "te-stsuite-%s%s.log", stamp, suffix_text);
+                                  ".log.te-stsuite-%s%s.log", stamp,
+                                  suffix_text);
         int jsonl_length = snprintf(jsonl_path, jsonl_path_size,
-                                    "te-stsuite-%s%s.jsonl", stamp, suffix_text);
+                                    ".log.te-stsuite-%s%s.jsonl", stamp,
+                                    suffix_text);
         if (log_length < 0 || (size_t)log_length >= log_path_size ||
             jsonl_length < 0 || (size_t)jsonl_length >= jsonl_path_size) {
             errno = ENAMETOOLONG;

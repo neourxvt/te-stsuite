@@ -61,10 +61,10 @@ cmd = "foot {CMD}"
 
 [xterm]
 cmd = "xterm -e {CMD}"
-xresources = """
-xterm*faceName: monospace
-xterm*faceSize: 11
-"""
+
+[xterm.xresources]
+"xterm*faceName" = "monospace"
+"xterm*faceSize" = 11
 ```
 
 Run the benchmark suite by default, or validate the configuration without
@@ -94,15 +94,17 @@ variants under `[kitty.configs]`, with each key naming a variant and its
 multiline string supplying the content. Each variant is run separately; its
 content is written to a temporary file and the standalone `{CFG}` command word
 is replaced with that file's path. Commands without inline variants must not
-contain `{CFG}`. The worker runs inside the terminal's PTY. Any terminal table
-may also define an `xresources` string. It is written to a temporary file for
-each terminal launch and exposed to that launch through `XENVIRONMENT`; the
-file is removed when the launch ends. Config variants inherit the terminal's
-`xresources` value. An empty string supplies an empty per-run file, and leaving
-the key out preserves the inherited environment. This adds resources for X
-clients that honor `XENVIRONMENT` while retaining resources already loaded into
-the display. Terminal command strings use whitespace, single or double quotes,
-and backslash escapes; they are split into arguments without shell expansion.
+contain `{CFG}`. The worker runs inside the terminal's PTY. A terminal can
+define a nested `xresources` table, for example `[xterm.xresources]`, with each
+key naming an X resource and each single-line string, integer, float, or
+boolean supplying its value. The table is serialized to a temporary file for
+each terminal launch and exposed through `XENVIRONMENT`; the file is removed
+when the launch ends. Config variants inherit the terminal's X resources. An
+empty table supplies an empty per-run file, and leaving the table out preserves
+the inherited environment. This adds resources for X clients that honor
+`XENVIRONMENT` while retaining resources already loaded into the display.
+Terminal command strings use whitespace, single or double quotes, and
+backslash escapes; they are split into arguments without shell expansion.
 
 The `process_isolation` setting selects `cgroupv2` or `taskset` and defaults to
 `cgroupv2`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
@@ -151,8 +153,8 @@ payload writes and exclude the per-sample reset and setup bytes.
 
 The report is printed after every benchmark and as a collective summary after
 all terminals finish. Matching logs are created in the current working
-directory as `te-stsuite-YYYYMMDD-HHMMSS.log` and
-`te-stsuite-YYYYMMDD-HHMMSS.jsonl`.
+directory as `.log.te-stsuite-YYYYMMDD-HHMMSS.log` and
+`.log.te-stsuite-YYYYMMDD-HHMMSS.jsonl`.
 
 The JSONL file is compact and contains run metadata, one cgroup check record per
 terminal, one flat result record per measured terminal and benchmark, and one

@@ -1,5 +1,6 @@
 /build/
 /cvtebench-*.log
 /cvtebench-*.jsonl
+/.log.te-stsuite-*
 /te-stsuite-*.log
 /te-stsuite-*.jsonl
