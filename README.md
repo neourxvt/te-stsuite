@@ -1,8 +1,8 @@
 # te-stsuite
 
 `te-stsuite` benchmarks terminal emulator startup, typing latency, and PTY rendering workloads on
-modern Linux. The workloads are implemented in C and are based on the built-in
-benchmarks from `vtebench`, including its missing-glyph workload.
+modern Linux. The workloads are implemented in C and are based on TermBench V2
+and the benchmarks from `vtebench`, including its missing-glyph workload.
 
 ## Build and run
 
@@ -228,8 +228,13 @@ sample counts; it does not extend `max_seconds`.
 The suite runs startup first, followed by the ported `vtebench_*` workloads:
 cursor motion, dense cells, light cells, medium cells, scrolling, four
 scrolling-region workloads, scrolling fullscreen, synchronized medium cells,
-Unicode symbols, and missing glyphs. The `typometer` typing latency benchmark
-runs after the PTY workloads.
+Unicode symbols, and missing glyphs. The `termbench_many_line` and
+`termbench_long_line` workloads then stream varied lowercase ASCII with and
+without explicit newlines. The `termbench_fg_per_char` and
+`termbench_fgbg_per_char` workloads repaint the terminal grid with per-cell RGB
+foreground colors or RGB foreground and background colors. See
+[ATTRIBUTIONS.md](ATTRIBUTIONS.md) for their source and adaptation details.
+The `typometer` typing latency benchmark runs after the PTY workloads.
 
 ## Typing latency
 

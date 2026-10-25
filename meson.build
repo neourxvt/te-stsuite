@@ -81,6 +81,7 @@ sources = files(
   'src/benchmarks.c',
   'src/benchmarks/startup.c',
   'src/benchmarks/typometer.c',
+  'src/benchmarks/termbench.c',
   'src/benchmarks/vtebench_cursor_motion.c',
   'src/benchmarks/vtebench_dense_cells.c',
   'src/benchmarks/vtebench_light_cells.c',

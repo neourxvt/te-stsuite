@@ -14,6 +14,10 @@ int bench_scrolling_top_small_region_prepare(BenchData *, const BenchContext *, 
 int bench_sync_medium_cells_prepare(BenchData *, const BenchContext *, char *, size_t);
 int bench_unicode_prepare(BenchData *, const BenchContext *, char *, size_t);
 int bench_missing_prepare(BenchData *, const BenchContext *, char *, size_t);
+int bench_termbench_many_line_prepare(BenchData *, const BenchContext *, char *, size_t);
+int bench_termbench_long_line_prepare(BenchData *, const BenchContext *, char *, size_t);
+int bench_termbench_fg_per_char_prepare(BenchData *, const BenchContext *, char *, size_t);
+int bench_termbench_fgbg_per_char_prepare(BenchData *, const BenchContext *, char *, size_t);
 
 bool bench_typometer_execute(const BenchContext *, const RunOptions *, bool,
                               BenchBegin, void *, BenchSamples *, char *, size_t);
@@ -34,6 +38,10 @@ const Benchmark te_stsuite_benchmarks[] = {
     {"vtebench_sync_medium_cells", bench_sync_medium_cells_prepare, NULL},
     {"vtebench_unicode", bench_unicode_prepare, NULL},
     {"vtebench_missing", bench_missing_prepare, NULL},
+    {"termbench_many_line", bench_termbench_many_line_prepare, NULL},
+    {"termbench_long_line", bench_termbench_long_line_prepare, NULL},
+    {"termbench_fg_per_char", bench_termbench_fg_per_char_prepare, NULL},
+    {"termbench_fgbg_per_char", bench_termbench_fgbg_per_char_prepare, NULL},
     {"typometer", NULL, bench_typometer_execute},
 };
 

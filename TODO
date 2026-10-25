@@ -1,10 +1,8 @@
 - BENCHMARKS:
   - [x] rename the benchmarks we took over from vtebench by prefixing it via 'vtebench'
-  - [ ] add benchmarks from typometer
-  - [ ] add benchmarks from termbench
+  - [x] add benchmarks from typometer
+  - [x] add benchmarks from termbench
   - [ ] add benchmarks from kitty benchmark
-  - [ ] add benchmarks from DOOM-fire-zig
-  - [ ] add benchmarks from TerminalBench
 
 - [x] "isolate" (can only merge) .Xresources and allow setting it in .toml explicitly
 - [x] add version str
