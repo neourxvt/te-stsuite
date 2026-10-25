@@ -54,6 +54,9 @@ typedef struct {
     char *command;
     char *inline_config;
     size_t inline_config_length;
+    /* NULL leaves XENVIRONMENT unchanged; an empty string creates an empty file. */
+    char *xresources;
+    size_t xresources_length;
 } TerminalConfig;
 
 /* The complete parsed configuration, including its source path. */

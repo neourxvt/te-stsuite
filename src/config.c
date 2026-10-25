@@ -45,6 +45,7 @@ void config_free(AppConfig *config) {
         free(config->terminals[i].name);
         free(config->terminals[i].command);
         free(config->terminals[i].inline_config);
+        free(config->terminals[i].xresources);
     }
     free(config->terminals);
     memset(config, 0, sizeof(*config));
@@ -54,11 +55,21 @@ void config_free(AppConfig *config) {
 static bool append_terminal(AppConfig *config, const char *name,
                             toml_datum_t command, const char *variant_name,
                             toml_datum_t variant_content, bool has_variant,
+                            toml_datum_t xresources,
                             char *error, size_t error_size) {
     char *command_copy = copy_toml_string(command);
     char *name_copy = NULL;
     char *content_copy = NULL;
     size_t content_length = 0;
+    char *xresources_copy = NULL;
+    size_t xresources_length = 0;
+
+    if (xresources.type == TOML_STRING) {
+        xresources_copy = copy_toml_string(xresources);
+        if (xresources.u.str.len >= 0) {
+            xresources_length = (size_t)xresources.u.str.len;
+        }
+    }
 
     if (has_variant) {
         if (variant_name != NULL && variant_name[0] != '\0') {
@@ -76,13 +87,15 @@ static bool append_terminal(AppConfig *config, const char *name,
     }
 
     if (command_copy == NULL || name_copy == NULL || command_copy[0] == '\0' ||
-        (has_variant && content_copy == NULL)) {
+        (has_variant && content_copy == NULL) ||
+        (xresources.type == TOML_STRING && xresources_copy == NULL)) {
         snprintf(error, error_size,
-                 "terminal '%s' needs a nonempty cmd and each config variant needs a nonempty name and string content",
+                 "terminal '%s' needs a nonempty cmd, valid xresources, and each config variant needs a nonempty name and string content",
                  name);
         free(command_copy);
         free(name_copy);
         free(content_copy);
+        free(xresources_copy);
         return false;
     }
 
@@ -94,6 +107,7 @@ static bool append_terminal(AppConfig *config, const char *name,
         free(command_copy);
         free(name_copy);
         free(content_copy);
+        free(xresources_copy);
         return false;
     }
     config->terminals = terminals;
@@ -102,6 +116,8 @@ static bool append_terminal(AppConfig *config, const char *name,
         .command = command_copy,
         .inline_config = content_copy,
         .inline_config_length = content_length,
+        .xresources = xresources_copy,
+        .xresources_length = xresources_length,
     };
     return true;
 }
@@ -216,9 +232,18 @@ bool config_load(const char *path, AppConfig *config, char *error,
         parsed_terminals = true;
         toml_datum_t command = toml_get(value, "cmd");
         toml_datum_t variants = toml_get(value, "configs");
+        toml_datum_t xresources = toml_get(value, "xresources");
+        if (xresources.type != TOML_UNKNOWN &&
+            xresources.type != TOML_STRING) {
+            snprintf(error, error_size,
+                     "terminal '%s' xresources must be a string", key);
+            toml_free(result);
+            config_free(config);
+            return false;
+        }
         if (variants.type == TOML_UNKNOWN) {
             if (!append_terminal(config, key, command, NULL,
-                                 (toml_datum_t){0}, false, error,
+                                 (toml_datum_t){0}, false, xresources, error,
                                  error_size)) {
                 toml_free(result);
                 config_free(config);
@@ -239,7 +264,7 @@ bool config_load(const char *path, AppConfig *config, char *error,
             if (!append_terminal(config, key, command,
                                  variants.u.tab.key[variant_index],
                                  variants.u.tab.value[variant_index], true,
-                                 error, error_size)) {
+                                 xresources, error, error_size)) {
                 toml_free(result);
                 config_free(config);
                 return false;

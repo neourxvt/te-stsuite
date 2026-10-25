@@ -58,6 +58,13 @@ font_size 14.0
 
 [foot]
 cmd = "foot {CMD}"
+
+[xterm]
+cmd = "xterm -e {CMD}"
+xresources = """
+xterm*faceName: monospace
+xterm*faceSize: 11
+"""
 ```
 
 Run the benchmark suite by default, or validate the configuration without
@@ -87,9 +94,15 @@ variants under `[kitty.configs]`, with each key naming a variant and its
 multiline string supplying the content. Each variant is run separately; its
 content is written to a temporary file and the standalone `{CFG}` command word
 is replaced with that file's path. Commands without inline variants must not
-contain `{CFG}`. The worker runs inside the terminal's PTY. Terminal command
-strings use whitespace, single or double quotes, and backslash escapes; they
-are split into arguments without shell expansion.
+contain `{CFG}`. The worker runs inside the terminal's PTY. Any terminal table
+may also define an `xresources` string. It is written to a temporary file for
+each terminal launch and exposed to that launch through `XENVIRONMENT`; the
+file is removed when the launch ends. Config variants inherit the terminal's
+`xresources` value. An empty string supplies an empty per-run file, and leaving
+the key out preserves the inherited environment. This adds resources for X
+clients that honor `XENVIRONMENT` while retaining resources already loaded into
+the display. Terminal command strings use whitespace, single or double quotes,
+and backslash escapes; they are split into arguments without shell expansion.
 
 The `process_isolation` setting selects `cgroupv2` or `taskset` and defaults to
 `cgroupv2`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
