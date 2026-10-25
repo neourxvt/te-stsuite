@@ -209,6 +209,114 @@ static char *child_path(const char *parent, const char *name) {
     return path;
 }
 
+/* Check whether a cgroup path ends at the requested subgroup. */
+static bool has_final_component(const char *path, const char *component) {
+    size_t path_length = strlen(path);
+    size_t component_length = strlen(component);
+    return path_length > component_length &&
+           path[path_length - component_length - 1] == '/' &&
+           memcmp(path + path_length - component_length, component,
+                  component_length) == 0;
+}
+
+/* Trim the runner subgroup to recover the delegated scope's root path. */
+static bool trim_final_component(char *path, const char *component) {
+    if (!has_final_component(path, component)) return false;
+    size_t path_length = strlen(path);
+    size_t component_length = strlen(component);
+    size_t parent_length = path_length - component_length - 1;
+    path[parent_length == 0 ? 1 : parent_length] = '\0';
+    return true;
+}
+
+/* Move the runner below the delegated root so it can enable child controllers. */
+static bool move_to_controller_subgroup(const char *parent,
+                                       const char *subgroup,
+                                       char *error, size_t error_size) {
+    char *subgroup_path = child_path(parent, subgroup);
+    if (subgroup_path == NULL) {
+        snprintf(error, error_size, "out of memory creating runner subgroup");
+        return false;
+    }
+    if (mkdir(subgroup_path, 0700) != 0) {
+        snprintf(error, error_size, "cannot create runner subgroup '%s': %s",
+                 subgroup_path, strerror(errno));
+        free(subgroup_path);
+        return false;
+    }
+    char *processes_path = child_path(subgroup_path, "cgroup.procs");
+    if (processes_path == NULL) {
+        snprintf(error, error_size, "out of memory moving runner to subgroup");
+        rmdir(subgroup_path);
+        free(subgroup_path);
+        return false;
+    }
+    char pid_text[32];
+    snprintf(pid_text, sizeof(pid_text), "%ld", (long)getpid());
+    bool moved = write_control(processes_path, pid_text);
+    if (!moved) {
+        int saved_errno = errno;
+        snprintf(error, error_size, "cannot move runner into delegated subgroup: %s",
+                 strerror(saved_errno));
+        rmdir(subgroup_path);
+        errno = saved_errno;
+    }
+    free(subgroup_path);
+    free(processes_path);
+    return moved;
+}
+
+/* Enable CPU and memory accounting before adding child cgroups. */
+static bool enable_accounting_controllers(const char *cgroup_path,
+                                          char *error, size_t error_size) {
+    char *available_path = child_path(cgroup_path, "cgroup.controllers");
+    char *enabled_path = child_path(cgroup_path, "cgroup.subtree_control");
+    if (available_path == NULL || enabled_path == NULL) {
+        snprintf(error, error_size, "out of memory enabling cgroup controllers");
+        free(available_path);
+        free(enabled_path);
+        return false;
+    }
+    FILE *file = fopen(available_path, "r");
+    if (file == NULL) {
+        snprintf(error, error_size, "cannot read '%s': %s", available_path,
+                 strerror(errno));
+        free(available_path);
+        free(enabled_path);
+        return false;
+    }
+    char *line = NULL;
+    size_t capacity = 0;
+    bool cpu_available = false;
+    bool memory_available = false;
+    if (getline(&line, &capacity, file) >= 0) {
+        char *save = NULL;
+        for (char *token = strtok_r(line, " \t\n", &save);
+             token != NULL; token = strtok_r(NULL, " \t\n", &save)) {
+            if (strcmp(token, "cpu") == 0) cpu_available = true;
+            if (strcmp(token, "memory") == 0) memory_available = true;
+        }
+    }
+    free(line);
+    fclose(file);
+    if (!cpu_available || !memory_available) {
+        snprintf(error, error_size,
+                 "CPU and memory controllers are not both available in '%s'",
+                 cgroup_path);
+        free(available_path);
+        free(enabled_path);
+        return false;
+    }
+    bool enabled = write_control(enabled_path, "+cpu +memory");
+    if (!enabled) {
+        snprintf(error, error_size, "cannot enable CPU and memory controllers in '%s': %s",
+                 cgroup_path, strerror(errno));
+    }
+    free(available_path);
+    free(enabled_path);
+    return enabled;
+}
+
 /* Remove partially-created leaves after a failed delegated scope setup. */
 static void remove_partial_scope(CgroupScope *scope) {
     if (scope->worker_created && rmdir(scope->worker_path) == 0) {
@@ -266,6 +374,49 @@ CgroupScope *cgroup_scope_create(void) {
         snprintf(scope->error, sizeof(scope->error),
                  "cannot read unified cgroup membership");
         free(parent);
+        return scope;
+    }
+
+    /* A delegated systemd scope keeps its runner in this named child group. */
+    const char *delegated_subgroup = getenv("TE_STSUITE_DELEGATED_SUBGROUP");
+    bool delegated_systemd_scope = delegated_subgroup != NULL;
+    if (delegated_systemd_scope &&
+        strcmp(delegated_subgroup, "te-stsuite-controller") != 0) {
+        snprintf(scope->error, sizeof(scope->error),
+                 "unexpected delegated systemd subgroup '%s'",
+                 delegated_subgroup);
+        free(parent);
+        free(membership);
+        return scope;
+    }
+    if (delegated_systemd_scope) {
+        bool parent_in_subgroup = has_final_component(parent, delegated_subgroup);
+        bool membership_in_subgroup =
+            has_final_component(membership, delegated_subgroup);
+        if (parent_in_subgroup != membership_in_subgroup) {
+            snprintf(scope->error, sizeof(scope->error),
+                     "runner cgroup paths disagree about subgroup '%s'",
+                     delegated_subgroup);
+            free(parent);
+            free(membership);
+            return scope;
+        }
+        if (parent_in_subgroup) {
+            trim_final_component(parent, delegated_subgroup);
+            trim_final_component(membership, delegated_subgroup);
+        } else if (!move_to_controller_subgroup(parent, delegated_subgroup,
+                                                scope->error,
+                                                sizeof(scope->error))) {
+            free(parent);
+            free(membership);
+            return scope;
+        }
+    }
+    if (delegated_systemd_scope &&
+        !enable_accounting_controllers(parent, scope->error,
+                                       sizeof(scope->error))) {
+        free(parent);
+        free(membership);
         return scope;
     }
 
@@ -327,6 +478,14 @@ CgroupScope *cgroup_scope_create(void) {
     }
     free(parent);
     scope->base_created = true;
+    char accounting_error[sizeof(scope->error)] = {0};
+    if (!enable_accounting_controllers(scope->base_path, accounting_error,
+                                       sizeof(accounting_error)) &&
+        delegated_systemd_scope) {
+        snprintf(scope->error, sizeof(scope->error), "%s", accounting_error);
+        remove_partial_scope(scope);
+        goto setup_failed;
+    }
     if (mkdir(scope->terminal_path, 0700) == 0) {
         scope->terminal_created = true;
     } else {

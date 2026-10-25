@@ -59,6 +59,10 @@ fi
 
 "$script_dir/build.sh"
 if [ "$launcher" = systemd-user-scope ]; then
-    exec systemd-run --user --scope --property=Delegate=yes -- "$runner" "$@"
+    # Let the runner move itself below the delegated scope before enabling controllers.
+    exec systemd-run --user --scope \
+        --property=Delegate=yes \
+        --setenv=TE_STSUITE_DELEGATED_SUBGROUP=te-stsuite-controller \
+        -- "$runner" "$@"
 fi
 exec "$runner" "$@"

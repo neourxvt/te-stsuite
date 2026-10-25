@@ -1088,6 +1088,8 @@ static bool run_terminal(const TerminalConfig *terminal,
         } while (gate_result < 0 && errno == EINTR);
         close(gate[0]);
         if (gate_result != 1 || release != 'G') _exit(126);
+        /* Keep the runner's delegated-cgroup hint private from launched TEs. */
+        unsetenv("TE_STSUITE_DELEGATED_SUBGROUP");
         execvp(argv[0], argv);
         dprintf(STDERR_FILENO, "te-stsuite: cannot start '%s': %s\n",
                 argv[0], strerror(errno));
