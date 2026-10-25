@@ -106,7 +106,7 @@ bool selection_validate(const AppConfig *config, const RunSelection *selection,
 bool selection_includes_benchmark(const RunSelection *selection,
                                   const char *name);
 int worker_run(const AppConfig *config, const RunSelection *selection,
-               const char *socket_path);
+               const char *control_path);
 int controller_run(const AppConfig *config, const RunSelection *selection,
                    const char *executable_path);
 

@@ -81,7 +81,7 @@ selects just that variant. Benchmark names are listed by `--help`.
 
 Each configured terminal launches sequentially. The `{CMD}` placeholder is
 expanded to the current executable, the TOML path, `--run`, and a private local
-worker socket option. A terminal can define multiple inline configuration
+worker control pipe option. A terminal can define multiple inline configuration
 variants under `[kitty.configs]`, with each key naming a variant and its
 multiline string supplying the content. Each variant is run separately; its
 content is written to a temporary file and the standalone `{CFG}` command word
@@ -90,28 +90,36 @@ contain `{CFG}`. The worker runs inside the terminal's PTY. Terminal command
 strings use whitespace, single or double quotes, and backslash escapes; they
 are split into arguments without shell expansion.
 
-The terminal process starts with CPU affinity restricted to CPU 0. If CPU 0 is
-unavailable to the current Linux cpuset, that terminal is skipped with an
-error. Avoid terminal commands that attach to an already-running daemon, since
-the new process must own the measured PTY session.
+Each terminal runs in a cgroup v2 isolated cpuset partition on one automatically
+selected exclusive CPU. The benchmark worker runs on the remaining CPUs. This
+requires the cpuset controller, a writable delegated cgroup v2 subtree whose
+current cgroup is a valid partition root, and at least two effective CPUs. The
+run stops before warmup if any requirement is missing. The isolated partition
+removes the selected logical CPU from scheduler load balancing and unbound
+workqueues; it does not move interrupts or isolate SMT sibling threads.
+Avoid terminal commands that attach to an already-running daemon, since the new
+process must own the measured PTY session.
 
 ## Measurements
 
 Before measuring, te-stsuite checks whether each terminal and its worker are
-placed in separate cgroups, then launches every selected terminal once for a
-separate warmup phase. It uses the same configured command for checks, warmup,
-and measured runs. The worker is placed in a sibling cgroup so its resource use
-does not count toward the terminal.
+placed in separate cgroups and verifies the isolated cpuset partition. It then
+launches every selected terminal once for a separate warmup phase. It uses the
+same configured command for checks, warmup, and measured runs. The worker is
+placed outside the isolated partition on the remaining CPUs, and its resource
+use does not count toward the terminal.
 
 The `monitor` setting selects `cgroupv2` or `polling` and defaults to
-`cgroupv2`. Cgroup v2 reads terminal CPU time from `cpu.stat`, and memory from
+`cgroupv2`. Both modes use cgroup v2 cpusets for terminal isolation. The
+`cgroupv2` backend reads terminal CPU time from `cpu.stat`, and memory from
 `memory.current` and `memory.peak`; memory includes charged cache and other
-cgroup memory, not only process RSS. The `polling` backend retains the prior
-`/proc` process-tree sampler and reports summed RSS. Both backends report CPU as
-a percentage of one core and memory as time-weighted average and peak MiB. Each
-startup and workload result has its own interval. If cgroup delegation is not
-available, the check says so and cgroup resource values are recorded as null;
-te-stsuite does not turn missing counters into zero or silently switch backends.
+cgroup memory, not only process RSS. The `polling` backend uses the `/proc`
+process-tree sampler and reports summed RSS. Both backends report CPU as a
+percentage of one core and memory as time-weighted average and peak MiB. Each
+startup and workload result has its own interval. If cgroup delegation or
+cpuset isolation is unavailable, the check fails and the run stops before
+warmup. Missing resource counters are recorded as null; te-stsuite does not
+turn missing counters into zero or silently switch backends.
 
 The startup benchmark launches the configured terminal repeatedly and measures
 from each launch until the in-terminal worker is ready. It gathers at least ten
@@ -138,7 +146,7 @@ partial results are marked with `"complete":false`.
 
 ```jsonl
 {"type":"run","schema":2,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2"}
-{"type":"cgroup_check","terminal":"kitty/compact","status":"inside","worker_moved":true,"detail":"terminal and worker are in separate cgroups"}
+{"type":"cgroup_check","terminal":"kitty/compact","status":"inside","worker_moved":true,"detail":"terminal and worker are in separate cgroups; terminal isolated on CPU 2"}
 {"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
 {"type":"end","status":"ok","results":1}
 ```

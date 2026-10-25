@@ -8,14 +8,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/un.h>
+#include <fcntl.h>
 #include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
-/* Send a complete control event even when the socket accepts partial writes. */
-static bool send_event(int socket_fd, const char *format, ...) {
+/* Send a complete control event through the worker's FIFO. */
+static bool send_event(int control_fd, const char *format, ...) {
     char message[512];
     va_list args;
     va_start(args, format);
@@ -25,8 +24,8 @@ static bool send_event(int socket_fd, const char *format, ...) {
 
     size_t offset = 0;
     while (offset < (size_t)length) {
-        ssize_t written = send(socket_fd, message + offset,
-                               (size_t)length - offset, MSG_NOSIGNAL);
+        ssize_t written = write(control_fd, message + offset,
+                                (size_t)length - offset);
         if (written < 0 && errno == EINTR) continue;
         if (written <= 0) return false;
         offset += (size_t)written;
@@ -47,28 +46,24 @@ static bool write_all(int fd, const void *data, size_t length) {
     return true;
 }
 
-/* Connect to the controller socket while the terminal process initializes. */
-static int connect_controller(const char *path) {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return -1;
-
-    struct sockaddr_un address = {.sun_family = AF_UNIX};
-    if (strlen(path) >= sizeof(address.sun_path)) {
-        close(fd);
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    strcpy(address.sun_path, path);
-
+/* Open the controller FIFO after its reader has been created. */
+static int open_controller_pipe(const char *path) {
     for (unsigned attempt = 0; attempt < 500; ++attempt) {
-        if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) {
+        int fd = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+        if (fd >= 0) {
+            int flags = fcntl(fd, F_GETFL);
+            if (flags < 0 || fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+                int saved_errno = errno;
+                close(fd);
+                errno = saved_errno;
+                return -1;
+            }
             return fd;
         }
-        if (errno != ENOENT && errno != ECONNREFUSED && errno != EINTR) break;
+        if (errno != ENOENT && errno != ENXIO && errno != EINTR) break;
         struct timespec pause = {.tv_sec = 0, .tv_nsec = 10000000};
         nanosleep(&pause, NULL);
     }
-    close(fd);
     return -1;
 }
 
@@ -112,19 +107,19 @@ static int compare_duration(const void *left, const void *right) {
 
 /* Execute all suite entries inside the terminal and bracket each workload. */
 int worker_run(const AppConfig *config, const RunSelection *selection,
-               const char *socket_path) {
+               const char *control_path) {
     signal(SIGPIPE, SIG_IGN);
     bool worker_moved = selection != NULL && selection->worker_cgroup_moved;
-    int socket_fd = connect_controller(socket_path);
-    if (socket_fd < 0) {
-        fprintf(stderr, "te-stsuite: cannot connect to controller: %s\n",
+    int control_fd = open_controller_pipe(control_path);
+    if (control_fd < 0) {
+        fprintf(stderr, "te-stsuite: cannot open controller control pipe: %s\n",
                 strerror(errno));
         return 1;
     }
 
     if (!isatty(STDOUT_FILENO)) {
-        send_event(socket_fd, "F benchmark worker stdout is not a terminal\n");
-        close(socket_fd);
+        send_event(control_fd, "F benchmark worker stdout is not a terminal\n");
+        close(control_fd);
         return 1;
     }
     struct winsize size = {0};
@@ -134,16 +129,16 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         size.ws_col = 80;
     }
 
-    if (!send_event(socket_fd, "R %ld %ld %u\n", (long)getpid(),
+    if (!send_event(control_fd, "R %ld %ld %u\n", (long)getpid(),
                     (long)getppid(), worker_moved ? 1U : 0U)) {
-        close(socket_fd);
+        close(control_fd);
         return 1;
     }
     if (selection != NULL &&
         (selection->phase == WORKER_PHASE_CHECK ||
          selection->phase == WORKER_PHASE_STARTUP)) {
-        send_event(socket_fd, "D\n");
-        close(socket_fd);
+        send_event(control_fd, "D\n");
+        close(control_fd);
         return 0;
     }
 
@@ -157,11 +152,11 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         char error[256] = {0};
         if (!prepare_benchmark(benchmark, &context, &config->options, &data,
                                error, sizeof(error))) {
-            send_event(socket_fd, "F %s: %s\n", benchmark->name,
+            send_event(control_fd, "F %s: %s\n", benchmark->name,
                        error[0] == '\0' ? "unable to prepare benchmark" : error);
             buffer_free(&data.setup);
             buffer_free(&data.payload);
-            close(socket_fd);
+            close(control_fd);
             return 1;
         }
 
@@ -179,19 +174,19 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
             buffer_free(&data.setup);
             buffer_free(&data.payload);
             if (!warmed) {
-                send_event(socket_fd, "F %s: PTY write failed during warmup\n",
+                send_event(control_fd, "F %s: PTY write failed during warmup\n",
                            benchmark->name);
-                close(socket_fd);
+                close(control_fd);
                 return 1;
             }
             continue;
         }
 
-        if (!send_event(socket_fd, "S %s %zu\n", benchmark->name,
+        if (!send_event(control_fd, "S %s %zu\n", benchmark->name,
                         data.payload.length)) {
             buffer_free(&data.setup);
             buffer_free(&data.payload);
-            close(socket_fd);
+            close(control_fd);
             return 1;
         }
 
@@ -249,21 +244,21 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
                 p90_ms = (double)durations[percentile_index] / 1000000.0;
                 stddev_ms = (double)(sqrtl(variance) / 1000000.0L);
             }
-            send_event(socket_fd, "E %s %u %.6f %.6f %.6f\n",
+            send_event(control_fd, "E %s %u %.6f %.6f %.6f\n",
                        benchmark->name, samples, mean_ms, p90_ms, stddev_ms);
         } else {
-            send_event(socket_fd, "F %s: %s\n", benchmark->name, failure);
+            send_event(control_fd, "F %s: %s\n", benchmark->name, failure);
         }
         free(durations);
         buffer_free(&data.setup);
         buffer_free(&data.payload);
         if (!ok) {
-            close(socket_fd);
+            close(control_fd);
             return 1;
         }
     }
 
-    send_event(socket_fd, "D\n");
-    close(socket_fd);
+    send_event(control_fd, "D\n");
+    close(control_fd);
     return 0;
 }

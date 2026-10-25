@@ -64,7 +64,7 @@ void monitor_destroy(Monitor *monitor) {
     free(monitor);
 }
 
-/* Attach before exec so all terminal descendants inherit the accounting scope. */
+/* Attach before exec so all terminal descendants inherit the isolated cpuset. */
 bool monitor_attach_terminal(Monitor *monitor, pid_t terminal_pid) {
     if (monitor == NULL || terminal_pid <= 0) return false;
     bool attached = cgroup_scope_attach_terminal(monitor->scope, terminal_pid);
@@ -76,6 +76,12 @@ bool monitor_attach_terminal(Monitor *monitor, pid_t terminal_pid) {
 const char *monitor_worker_cgroup_path(const Monitor *monitor) {
     if (monitor == NULL) return "-";
     return cgroup_scope_worker_path(monitor->scope);
+}
+
+/* Expose the automatically selected isolated CPU for run progress output. */
+const char *monitor_isolated_cpu(const Monitor *monitor) {
+    if (monitor == NULL) return "-";
+    return cgroup_scope_isolated_cpu(monitor->scope);
 }
 
 /* Join the worker's current process to the private sibling cgroup. */

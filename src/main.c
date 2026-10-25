@@ -17,12 +17,12 @@ typedef struct {
 static void print_usage(const char *program) {
     printf("Usage: %s [CONFIG.toml] [OPTIONS]\n\n", program);
     printf("Runs terminal emulator benchmarks on modern Linux from named TOML entries.\n");
-    printf("It checks cgroup placement, then warms and benchmarks each selected\n");
-    printf("terminal before moving to the next, with it pinned to CPU 0. The\n");
-    printf("TOML selects cgroup v2 accounting or /proc process-tree polling. Both\n");
-    printf("sample CPU and memory per interval and record PTY write times. Results are\n");
-    printf("printed per benchmark, summarized per terminal and collectively, and\n");
-    printf("saved as timestamped text and JSONL logs in the current directory.\n\n");
+    printf("It checks cgroup placement and CPU isolation, then warms and benchmarks\n");
+    printf("each selected terminal on one available isolated CPU. The TOML selects\n");
+    printf("cgroup v2 accounting or /proc process-tree polling. Both sample CPU and\n");
+    printf("memory per interval and record PTY write times. Results are printed per\n");
+    printf("benchmark, summarized per terminal and collectively, and saved as\n");
+    printf("timestamped text and JSONL logs in the current directory.\n\n");
     printf("Options:\n");
     printf("  -h, --help               Show this help\n");
     printf("      --version            Show the te-stsuite version\n");
@@ -30,7 +30,7 @@ static void print_usage(const char *program) {
     printf("  -t, --terminal NAME      Run only this terminal; repeat to select more\n");
     printf("  -b, --benchmark NAME     Run only this workload; repeat to select more\n\n");
     printf("TOML monitor defaults to cgroupv2; choose \"polling\" to use /proc.\n");
-    printf("Cgroup placement checks run automatically before warmup and measurement.\n\n");
+    printf("Cgroup isolation checks run before warmup and measurement.\n\n");
     printf("A terminal name selects all its config variants; a name such as\n");
     printf("kitty/compact selects one variant. Workloads:\n");
     const char *benchmark_names[te_stsuite_benchmark_count];
@@ -84,7 +84,7 @@ static char *self_path(void) {
 /* Parse the required config path and dispatch validation, control, or worker mode. */
 int main(int argc, char **argv) {
     const char *config_path = NULL;
-    const char *socket_path = NULL;
+    const char *control_path = NULL;
     bool run = false;
     bool validate = false;
     bool version = false;
@@ -121,13 +121,14 @@ int main(int argc, char **argv) {
                 arguments_valid = false;
                 break;
             }
-        } else if (strcmp(argv[i], "--worker-socket") == 0) {
+        } else if (strcmp(argv[i], "--worker-control") == 0 ||
+                   strcmp(argv[i], "--worker-socket") == 0) {
             if (++i >= argc) {
-                fprintf(stderr, "te-stsuite: --worker-socket needs a path\n");
+                fprintf(stderr, "te-stsuite: --worker-control needs a path\n");
                 arguments_valid = false;
                 break;
             }
-            socket_path = argv[i];
+            control_path = argv[i];
         } else if (strcmp(argv[i], "--worker-phase") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "te-stsuite: --worker-phase needs a phase\n");
@@ -198,14 +199,14 @@ int main(int argc, char **argv) {
         selector_list_free(&benchmarks);
         return 2;
     }
-    if (socket_path != NULL && (!run || validate)) {
-        fprintf(stderr, "te-stsuite: --worker-socket requires --run\n");
+    if (control_path != NULL && (!run || validate)) {
+        fprintf(stderr, "te-stsuite: --worker-control requires --run\n");
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
     }
-    if (private_worker_option && socket_path == NULL) {
-        fprintf(stderr, "te-stsuite: worker phase and cgroup options require --worker-socket\n");
+    if (private_worker_option && control_path == NULL) {
+        fprintf(stderr, "te-stsuite: worker phase and cgroup options require --worker-control\n");
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
@@ -217,7 +218,7 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    bool worker_cgroup_moved = socket_path != NULL &&
+    bool worker_cgroup_moved = control_path != NULL &&
                                monitor_join_worker_cgroup(worker_cgroup_path);
 
     RunSelection selection = {
@@ -246,8 +247,8 @@ int main(int argc, char **argv) {
     }
 
     int result = 0;
-    if (socket_path != NULL) {
-        result = worker_run(&config, &selection, socket_path);
+    if (control_path != NULL) {
+        result = worker_run(&config, &selection, control_path);
     } else if (validate) {
         printf("Validated %s with %zu terminal configuration(s).\n",
                config.path, config.terminal_count);

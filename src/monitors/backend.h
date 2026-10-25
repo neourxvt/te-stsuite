@@ -23,6 +23,7 @@ CgroupScope *cgroup_scope_create(void);
 void cgroup_scope_destroy(CgroupScope *scope);
 bool cgroup_scope_attach_terminal(CgroupScope *scope, pid_t terminal_pid);
 const char *cgroup_scope_worker_path(const CgroupScope *scope);
+const char *cgroup_scope_isolated_cpu(const CgroupScope *scope);
 bool cgroupv2_join_worker(const char *path);
 MonitorIsolation cgroup_scope_check(CgroupScope *scope, pid_t terminal_pid,
                                     pid_t worker_pid, bool worker_moved,

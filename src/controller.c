@@ -1,7 +1,6 @@
 #define _GNU_SOURCE
 #include "te-stsuite.h"
 #include "yyjson.h"
-#include "process_isolation.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -11,9 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -289,7 +286,7 @@ static char **expand_command(const TerminalConfig *terminal,
                              const AppConfig *config,
                              const RunSelection *selection,
                              const char *executable_path,
-                             const char *socket_path, const char *config_path,
+                             const char *control_path, const char *config_path,
                              WorkerPhase phase,
                              const char *worker_cgroup_path,
                              size_t *argc_out,
@@ -354,8 +351,8 @@ static char **expand_command(const TerminalConfig *terminal,
             argv[output++] = strdup(executable_path);
             argv[output++] = strdup(config->path);
             argv[output++] = strdup("--run");
-            argv[output++] = strdup("--worker-socket");
-            argv[output++] = strdup(socket_path);
+            argv[output++] = strdup("--worker-control");
+            argv[output++] = strdup(control_path);
             argv[output++] = strdup("--worker-phase");
             argv[output++] = strdup(phase == WORKER_PHASE_CHECK
                                         ? "check"
@@ -897,29 +894,59 @@ static bool open_run_logs(char *log_path, size_t log_path_size,
     return false;
 }
 
-/* Create the private local control socket used by one terminal run. */
-static int open_control_socket(char *path, size_t path_size) {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-    if (fd < 0) return -1;
-    snprintf(path, path_size, "/tmp/te-stsuite-%ld-%llu.sock", (long)getpid(),
-             (unsigned long long)(monotonic_now_ns() % 1000000000ULL));
-    struct sockaddr_un address = {.sun_family = AF_UNIX};
-    if (strlen(path) >= sizeof(address.sun_path)) {
-        close(fd);
-        errno = ENAMETOOLONG;
+/* Create a private FIFO and a keepalive writer for one terminal run. */
+static int open_control_fifo(char *path, size_t path_size,
+                             int *keepalive_fd) {
+    *keepalive_fd = -1;
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 32; ++attempt) {
+        int length = snprintf(path, path_size,
+                              "/tmp/te-stsuite-%ld-%llu-%u.fifo",
+                              (long)getpid(),
+                              (unsigned long long)(monotonic_now_ns() %
+                                                   1000000000ULL),
+                              attempt);
+        if (length < 0 || (size_t)length >= path_size) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (mkfifo(path, 0600) == 0) {
+            created = true;
+            break;
+        }
+        if (errno != EEXIST) return -1;
+    }
+    if (!created) {
+        errno = EEXIST;
         return -1;
     }
-    strcpy(address.sun_path, path);
-    unlink(path);
-    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0 ||
-        chmod(path, 0600) != 0 || listen(fd, 1) != 0) {
+
+    int reader = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (reader < 0) {
         int saved_errno = errno;
-        close(fd);
         unlink(path);
         errno = saved_errno;
         return -1;
     }
-    return fd;
+    /* Avoid a permanent POLLHUP before the terminal worker opens the FIFO. */
+    int keepalive = open(path, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (keepalive < 0) {
+        int saved_errno = errno;
+        close(reader);
+        unlink(path);
+        errno = saved_errno;
+        return -1;
+    }
+    *keepalive_fd = keepalive;
+    return reader;
+}
+
+/* Close the controller FIFO descriptors and remove the private path. */
+static void close_control_fifo(int reader_fd, int keepalive_fd,
+                               const char *path) {
+    if (reader_fd >= 0) close(reader_fd);
+    if (keepalive_fd >= 0) close(keepalive_fd);
+    if (path != NULL && path[0] != '\0') unlink(path);
 }
 
 /* Ask a spawned terminal process group to exit, then reap its direct child. */
@@ -1075,10 +1102,12 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (startup_sample != NULL) {
         memset(startup_sample, 0, sizeof(*startup_sample));
     }
-    char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
-    int listener = open_control_socket(socket_path, sizeof(socket_path));
-    if (listener < 0) {
-        report_styled(color_red, "  Error: cannot create control socket: %s\n",
+    char control_path[128] = {0};
+    int keepalive_fd = -1;
+    int control_fd = open_control_fifo(control_path, sizeof(control_path),
+                                       &keepalive_fd);
+    if (control_fd < 0) {
+        report_styled(color_red, "  Error: cannot create control pipe: %s\n",
                       strerror(errno));
         return false;
     }
@@ -1088,8 +1117,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (!write_inline_config(terminal, config_path, sizeof(config_path), error,
                              sizeof(error))) {
         report_styled(color_red, "  Error: %s\n", error);
-        close(listener);
-        unlink(socket_path);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
         return false;
     }
     MonitorBackend backend = phase == WORKER_PHASE_CHECK
@@ -1099,21 +1127,19 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (monitor == NULL) {
         report_styled(color_red,
                       "  Error: out of memory while creating monitor\n");
-        close(listener);
-        unlink(socket_path);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
         if (config_path[0] != '\0') unlink(config_path);
         return false;
     }
     size_t argc = 0;
     char **argv = expand_command(terminal, config, selection, executable_path,
-                                 socket_path, config_path, phase,
+                                 control_path, config_path, phase,
                                  monitor_worker_cgroup_path(monitor),
                                  &argc, error,
                                  sizeof(error));
     if (argv == NULL) {
         report_styled(color_red, "  Error: %s\n", error);
-        close(listener);
-        unlink(socket_path);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
         if (config_path[0] != '\0') unlink(config_path);
         monitor_destroy(monitor);
         return false;
@@ -1124,8 +1150,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         report_styled(color_red, "  Error: cannot create launch gate: %s\n",
                       strerror(errno));
         free_argv(argv, argc);
-        close(listener);
-        unlink(socket_path);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
         if (config_path[0] != '\0') unlink(config_path);
         monitor_destroy(monitor);
         return false;
@@ -1137,8 +1162,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         free_argv(argv, argc);
         close(gate[0]);
         close(gate[1]);
-        close(listener);
-        unlink(socket_path);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
         if (config_path[0] != '\0') unlink(config_path);
         monitor_destroy(monitor);
         return false;
@@ -1146,12 +1170,6 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (child == 0) {
         close(gate[1]);
         setpgid(0, 0);
-        if (!process_isolation_pin_cpu(0)) {
-            dprintf(STDERR_FILENO,
-                    "te-stsuite: cannot pin terminal to CPU 0: %s\n",
-                    strerror(errno));
-            _exit(126);
-        }
         char release = 0;
         ssize_t gate_result;
         do {
@@ -1169,7 +1187,16 @@ static bool run_terminal(const TerminalConfig *terminal,
     close(gate[0]);
     setpgid(child, child);
     free_argv(argv, argc);
-    monitor_attach_terminal(monitor, child);
+    if (!monitor_attach_terminal(monitor, child)) {
+        report_styled(color_red, "  Error: cannot isolate terminal process: %s\n",
+                      monitor_scope_error(monitor));
+        close(gate[1]);
+        stop_terminal(child, false, 0);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
+        if (config_path[0] != '\0') unlink(config_path);
+        monitor_destroy(monitor);
+        return false;
+    }
     uint64_t launch_ns = monotonic_now_ns();
     monitor_begin(monitor, launch_ns);
     char release = 'G';
@@ -1181,8 +1208,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (released != 1) {
         report_styled(color_red, "  Error: cannot release terminal launch gate\n");
         stop_terminal(child, false, 0);
-        close(listener);
-        unlink(socket_path);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
         if (config_path[0] != '\0') unlink(config_path);
         monitor_destroy(monitor);
         return false;
@@ -1190,50 +1216,50 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (phase == WORKER_PHASE_CHECK) {
         report_styled(color_cyan, "  Checking cgroup placement...\n");
     } else if (phase == WORKER_PHASE_WARMUP) {
-        report_styled(color_cyan, "  Warming terminal on CPU 0...\n");
+        report_styled(color_cyan, "  Warming terminal on isolated CPU %s...\n",
+                      monitor_isolated_cpu(monitor));
     } else {
-        report_styled(color_cyan, "  Starting with CPU affinity 0...\n");
+        report_styled(color_cyan, "  Starting on isolated CPU %s...\n",
+                      monitor_isolated_cpu(monitor));
     }
 
     uint64_t deadline = launch_ns +
                         (uint64_t)config->options.startup_timeout_seconds *
                             1000000000ULL;
-    int connection = -1;
+    bool worker_started = false;
     bool child_reaped = false;
     int child_status = 0;
-    while (connection < 0 && monotonic_now_ns() < deadline) {
-        struct pollfd event = {.fd = listener, .events = POLLIN};
-        poll(&event, 1, 20);
+    while (!worker_started && monotonic_now_ns() < deadline) {
+        struct pollfd event = {.fd = control_fd, .events = POLLIN};
+        int polled = poll(&event, 1, 20);
         monitor_tick(monitor, monotonic_now_ns());
+        if (polled < 0 && errno != EINTR) break;
         if (event.revents & POLLIN) {
-            connection = accept4(listener, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
-            if (connection >= 0) {
-                struct ucred peer = {0};
-                socklen_t peer_size = sizeof(peer);
-                if (getsockopt(connection, SOL_SOCKET, SO_PEERCRED, &peer,
-                               &peer_size) == 0) {
-                    monitor_set_worker(monitor, peer.pid, 0);
-                }
+            worker_started = true;
+            if (keepalive_fd >= 0) {
+                /* Worker data now proves a real writer exists; preserve EOF. */
+                close(keepalive_fd);
+                keepalive_fd = -1;
             }
         }
         if (!child_reaped) {
             pid_t status = waitpid(child, &child_status, WNOHANG);
             if (status == child) child_reaped = true;
         }
-        if (child_reaped && connection < 0) break;
+        if (child_reaped && !worker_started) break;
     }
-    close(listener);
-    unlink(socket_path);
-    if (connection < 0) {
+    if (worker_started) unlink(control_path);
+    if (!worker_started) {
         monitor_end(monitor, monotonic_now_ns());
         if (child_reaped) {
             report_styled(color_red,
-                          "  Error: terminal exited before the benchmark worker connected\n");
+                          "  Error: terminal exited before the worker sent a control event\n");
         } else {
             report_styled(color_red, "  Error: startup timed out after %u seconds\n",
                           config->options.startup_timeout_seconds);
         }
         stop_terminal(child, child_reaped, child_status);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
         monitor_destroy(monitor);
         if (config_path[0] != '\0') unlink(config_path);
         return false;
@@ -1270,14 +1296,14 @@ static bool run_terminal(const TerminalConfig *terminal,
                                    : deadline + worker_allowance;
 
     while (!done && monotonic_now_ns() < worker_deadline) {
-        struct pollfd event = {.fd = connection, .events = POLLIN};
+        struct pollfd event = {.fd = control_fd, .events = POLLIN};
         int polled = poll(&event, 1, 20);
         uint64_t now = monotonic_now_ns();
         if (!ready || active) monitor_tick(monitor, now);
         if (polled < 0 && errno != EINTR) break;
         if (event.revents & (POLLIN | POLLHUP)) {
             char chunk[512];
-            ssize_t bytes = read(connection, chunk, sizeof(chunk));
+            ssize_t bytes = read(control_fd, chunk, sizeof(chunk));
             if (bytes == 0) break;
             if (bytes < 0 && errno != EAGAIN && errno != EINTR) break;
             if (bytes > 0) {
@@ -1336,7 +1362,7 @@ static bool run_terminal(const TerminalConfig *terminal,
             print_summary(&summary);
         }
     }
-    close(connection);
+    close_control_fifo(control_fd, keepalive_fd, control_path);
     stop_terminal(child, child_reaped, child_status);
     monitor_destroy(monitor);
     if (config_path[0] != '\0') unlink(config_path);
@@ -1519,7 +1545,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         return 1;
     }
 
-    report_styled(color_bold_cyan, "Cgroup placement checks\n");
+    report_styled(color_bold_cyan, "Cgroup isolation checks\n");
     size_t terminal_number = 0;
     size_t check_index = 0;
     bool checks_passed = true;
