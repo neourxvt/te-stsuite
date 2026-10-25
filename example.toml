@@ -28,8 +28,17 @@ typometer_pause_ms = 1000
 
 # Each named table configures a terminal. Its cmd must include {CMD} as a
 # standalone word; use {CFG} once when defining inline config variants below.
+# Use a minimal monospace font configuration at size 11 for each terminal.
+# Kitty also offers a profile with latency settings for comparison.
 [alacritty]
-cmd = "alacritty -e {CMD}"
+cmd = "alacritty --config-file {CFG} -e {CMD}"
+
+[alacritty.configs]
+standard = """
+[font]
+normal = { family = "monospace" }
+size = 11.0
+"""
 
 [kitty]
 cmd = "kitty --config {CFG} {CMD}"
@@ -37,15 +46,33 @@ cmd = "kitty --config {CFG} {CMD}"
 # Each key names a variant; its string is written to a temporary config file.
 # The terminal command uses {CFG} in place of that file's path.
 [kitty.configs]
-compact = """
+defaults = """
+font_family monospace
 font_size 11.0
+"""
+
+minlatency = """
+font_family monospace
+font_size 11.0
+# Minimize latency
+input_delay 0
+repaint_delay 2
+sync_to_monitor no
+wayland_enable_ime no
 """
 
 [nrxvt]
 cmd = "nrxvt -e {CMD}"
 
+# X resource clients receive their font settings through XENVIRONMENT.
+[nrxvt.xresources]
+"nrxvt*font" = "xft:monospace:size=11"
+
 [urxvt]
 cmd = "/usr/bin/urxvt -e {CMD}"
+
+[urxvt.xresources]
+"URxvt*font" = "xft:monospace:size=11"
 
 [xterm]
 cmd = "xterm -e {CMD}"
@@ -56,10 +83,45 @@ cmd = "xterm -e {CMD}"
 "xterm*faceSize" = 11
 
 [ghostty]
-cmd = "ghostty -e {CMD}"
+# Ghostty requires --config-file=PATH, so join the standalone {CFG} in a shell.
+cmd = '''sh -c 'ghostty_config=$1; shift; exec ghostty --config-default-files=false --config-file="$ghostty_config" -e "$@"' sh {CFG} {CMD}'''
+
+[ghostty.configs]
+standard = """
+font-family = monospace
+font-size = 11
+"""
 
 [rio]
-cmd = "rio -e {CMD}"
+# Rio loads config.toml from RIO_CONFIG_HOME rather than taking a file argument.
+# The wrapper's directory setup is included in startup measurements.
+cmd = '''
+sh -c '
+    rio_config_dir=$(mktemp -d /tmp/te-stsuite-rio-XXXXXX) || exit 1
+    trap "rm -rf -- \"$rio_config_dir\"" 0
+    trap "exit 1" HUP INT TERM
+    ln -s "$1" "$rio_config_dir/config.toml" || exit 1
+    shift
+    RIO_CONFIG_HOME="$rio_config_dir" rio -e "$@"
+' sh {CFG} {CMD}
+'''
+
+[rio.configs]
+standard = """
+[fonts]
+family = "monospace"
+size = 11.0
+"""
 
 [contour]
-cmd = "contour terminal {CMD}"
+cmd = "contour terminal config {CFG} profile standard {CMD}"
+
+[contour.configs]
+standard = """
+profiles:
+  standard:
+    font:
+      size: 11
+      regular:
+        family: monospace
+"""
