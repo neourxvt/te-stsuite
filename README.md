@@ -76,6 +76,19 @@ launching any terminals:
 ./cycle.sh example.toml
 ```
 
+When the user systemd manager does not delegate `cpuset`, run through the
+separate system-manager launcher with an explicit allocation of at least two
+CPUs:
+
+```sh
+./cycle-sudo.sh --cpus 2,4 example.toml -b startup
+```
+
+Replace `2,4` with the CPUs to reserve. The launcher builds as the current user
+and runs the suite as that user in a transient cpuset partition. It requires
+systemd 261 or newer and sudo permission to start system services. The CPUs are
+released when the service exits. `cycle.sh` is unchanged.
+
 Use repeatable `-t`/`--terminal` and `-b`/`--benchmark` selectors to limit a
 run. Terminal names match the named TOML tables; selecting a terminal with
 config variants runs every variant, while a full name such as `kitty/compact`
