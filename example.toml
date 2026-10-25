@@ -1,19 +1,32 @@
+# Minimum payload size for each workload sample, in bytes.
 min_bytes = 1048576
+# Number of unmeasured passes for each workload before measuring.
 warmup = 1
+# Maximum time to measure each workload, in seconds.
 max_seconds = 10
+# Maximum samples per workload and startup run; 0 means no sample limit.
 max_samples = 0
+# Minimum total startup time to measure, in seconds.
 startup_min_seconds = 3
+# Minimum number of terminal launches to measure for startup.
 startup_min_samples = 10
+# Maximum time allowed for each terminal launch to start its worker.
 startup_timeout_seconds = 30
+# Resource accounting: "cgroupv2" or "polling".
 monitor = "cgroupv2"
+# CPU placement: "cgroupv2" or "taskset".
 process_isolation = "cgroupv2"
 
+# Each named table configures a terminal. Its cmd must include {CMD} as a
+# standalone word; use {CFG} once when defining inline config variants below.
 [alacritty]
 cmd = "alacritty -e {CMD}"
 
 [kitty]
 cmd = "kitty --config {CFG} {CMD}"
 
+# Each key names a variant; its string is written to a temporary config file.
+# The terminal command uses {CFG} in place of that file's path.
 [kitty.configs]
 compact = """
 font_size 11.0
