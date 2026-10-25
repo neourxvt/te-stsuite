@@ -303,27 +303,26 @@ static bool capture_terminal_output(int *stdout_fd, int *stderr_fd,
     return ok;
 }
 
-/* Record the terminal's first warmup output in both run artifacts. */
+/* Record each terminal's warmup output once in both run artifacts. */
 static bool write_warmup_output(const char *terminal,
                                 const TerminalRunResult *sample) {
     bool ok = true;
     if (log_file != NULL) {
-        if (fprintf(log_file, "Captured stdout (%s, warmup):\n", terminal) < 0 ||
-            (sample->stdout_output.length > 0 &&
-             fwrite(sample->stdout_output.data, 1,
-                    sample->stdout_output.length, log_file) !=
-                 sample->stdout_output.length) ||
-            (sample->stdout_output.length > 0 &&
-             sample->stdout_output.data[sample->stdout_output.length - 1] != '\n' &&
-             fputc('\n', log_file) == EOF) ||
-            fprintf(log_file, "Captured stderr (%s, warmup):\n", terminal) < 0 ||
+        /* Omit headings for empty streams; terminate partial output lines. */
+        if ((sample->stdout_output.length > 0 &&
+             (fprintf(log_file, "Captured stdout (%s, warmup):\n", terminal) < 0 ||
+              fwrite(sample->stdout_output.data, 1,
+                     sample->stdout_output.length, log_file) !=
+                  sample->stdout_output.length ||
+              (sample->stdout_output.data[sample->stdout_output.length - 1] != '\n' &&
+               fputc('\n', log_file) == EOF))) ||
             (sample->stderr_output.length > 0 &&
-             fwrite(sample->stderr_output.data, 1,
-                    sample->stderr_output.length, log_file) !=
-                 sample->stderr_output.length) ||
-            (sample->stderr_output.length > 0 &&
-             sample->stderr_output.data[sample->stderr_output.length - 1] != '\n' &&
-             fputc('\n', log_file) == EOF) ||
+             (fprintf(log_file, "Captured stderr (%s, warmup):\n", terminal) < 0 ||
+              fwrite(sample->stderr_output.data, 1,
+                     sample->stderr_output.length, log_file) !=
+                  sample->stderr_output.length ||
+              (sample->stderr_output.data[sample->stderr_output.length - 1] != '\n' &&
+               fputc('\n', log_file) == EOF))) ||
             fflush(log_file) != 0) {
             ok = false;
         }
@@ -986,7 +985,7 @@ static void jsonl_write_isolation_check(const char *terminal,
     jsonl_write_doc(doc, object);
 }
 
-/* Return a short human-facing status label for the failure summary. */
+/* Return a short human-facing status label for isolation reports. */
 static const char *isolation_check_status(MonitorIsolation isolation) {
     switch (isolation) {
         case MONITOR_ISOLATION_INSIDE: return "passed";
@@ -1237,19 +1236,6 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                          "%s", detail == NULL ? monitor_scope_error(monitor)
                                                : detail);
             }
-            if (isolation == MONITOR_ISOLATION_INSIDE) {
-                report_styled(color_green,
-                              "  Process isolation check: passed (%s)\n",
-                              detail == NULL ? "ok" : detail);
-            } else if (isolation == MONITOR_ISOLATION_OUTSIDE) {
-                report_styled(color_red,
-                              "  Process isolation check: outside (%s)\n",
-                              detail == NULL ? "placement failed" : detail);
-            } else {
-                report_styled(color_yellow,
-                              "  Process isolation check: unavailable (%s)\n",
-                              detail == NULL ? monitor_scope_error(monitor) : detail);
-            }
             if (!acknowledged) {
                 *worker_failed = true;
                 *done = true;
@@ -1275,9 +1261,6 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
             if (!summary_push(summaries, &summary)) return false;
             jsonl_write_result(&summaries->items[summaries->count - 1]);
         }
-        if (phase != WORKER_PHASE_CHECK && phase != WORKER_PHASE_STARTUP) {
-            report_styled(color_green, "  Ready\n");
-        }
         if (phase == WORKER_PHASE_BENCHMARK && include_startup) {
             print_summary(&summaries->items[summaries->count - 1]);
         }
@@ -1292,7 +1275,6 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         *active_bytes = bytes;
         *active = true;
         monitor_begin(monitor, monotonic_now_ns());
-        report_styled(color_cyan, "  Running: %s\n", name);
         return true;
     }
     if (line[0] == 'E' && line[1] == ' ') {
@@ -1542,21 +1524,6 @@ static bool run_terminal(const TerminalConfig *terminal,
         return false;
     }
     if (capture_outputs) run_result->launched = true;
-    if (phase == WORKER_PHASE_CHECK) {
-        report_styled(color_cyan, "  Checking process placement...\n");
-    } else if (phase == WORKER_PHASE_WARMUP) {
-        report_styled(color_cyan,
-                      config->process_isolation == PROCESS_ISOLATION_CGROUPV2
-                          ? "  Warming terminal on isolated CPU %s...\n"
-                          : "  Warming terminal pinned to CPU %s...\n",
-                      monitor_selected_cpu(monitor));
-    } else if (phase != WORKER_PHASE_STARTUP) {
-        report_styled(color_cyan,
-                      config->process_isolation == PROCESS_ISOLATION_CGROUPV2
-                          ? "  Starting on isolated CPU %s...\n"
-                          : "  Starting pinned to CPU %s...\n",
-                      monitor_selected_cpu(monitor));
-    }
 
     uint64_t deadline = launch_ns +
                         (uint64_t)config->options.startup_timeout_seconds *
@@ -1953,8 +1920,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                   monitor_backend_name(config->monitor_backend));
     report_styled(color_dim, "Isolation      %s\n",
                   process_isolation_name(config->process_isolation));
-    report_styled(color_dim, "Text log       %s\n", log_path);
-    report_styled(color_dim, "JSONL log      %s\n\n", jsonl_path);
+    report("\n");
     size_t selected_terminal_count = 0;
     for (size_t i = 0; i < config->terminal_count; ++i) {
         if (terminal_is_selected(&config->terminals[i], selection)) {
@@ -2009,9 +1975,10 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         jsonl_write_isolation_check(result->terminal, result->isolation,
                                     result->detail, result->cgroups_used,
                                     result->worker_moved);
-        report_styled(ok ? color_green : color_red,
-                      "  %s: Process isolation check\n\n",
-                      ok ? "Finished" : "Failed");
+        /* Report once, after accounting for terminal and worker exit failures. */
+        report_styled(result->passed ? color_green : color_red,
+                      "  Process isolation check: %s (%s)\n",
+                      isolation_check_status(result->isolation), result->detail);
         if (!result->passed) checks_passed = false;
     }
 
@@ -2029,7 +1996,6 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     }
 
     bool all_ok = true;
-    bool warmup_output_shown = false;
     size_t benchmark_count = selected_benchmark_count(selection);
     bool startup_selected = selection_includes_benchmark(selection, "startup");
     size_t workload_count = benchmark_count - (startup_selected ? 1 : 0);
@@ -2037,7 +2003,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         report_styled(color_bold_cyan,
                       "No benchmarks selected; skipping warmup and measurement.\n");
     } else {
-        report_styled(color_bold_cyan, "Warmup and benchmarks\n");
+        report_styled(color_bold_cyan, "\nBenchmarks\n");
     }
     terminal_number = 0;
     for (size_t i = 0; i < config->terminal_count; ++i) {
@@ -2047,24 +2013,23 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                       terminal_number, selected_terminal_count,
                       config->terminals[i].name);
         if (benchmark_count > 0) {
-            report_styled(color_dim, "  Warmup\n");
             TerminalRunResult warmup_output;
             bool warmup_ok = run_terminal(&config->terminals[i], config,
                                           selection, executable_path,
                                           WORKER_PHASE_WARMUP, &summaries,
                                           NULL, false, &warmup_output);
-            if (warmup_output.launched && !warmup_output_shown) {
+            if (warmup_output.launched) {
                 bool output_ok = write_warmup_output(
                     config->terminals[i].name, &warmup_output);
                 print_warmup_output(&warmup_output);
-                warmup_output_shown = true;
                 if (!output_ok) warmup_ok = false;
             }
             captured_stream_free(&warmup_output.stdout_output);
             captured_stream_free(&warmup_output.stderr_output);
-            if (!warmup_ok) all_ok = false;
-            report_styled(warmup_ok ? color_green : color_red,
-                          "  %s: Warmup\n", warmup_ok ? "Finished" : "Failed");
+            if (!warmup_ok) {
+                all_ok = false;
+                report_styled(color_red, "  Failed: Warmup\n");
+            }
 
             if (startup_selected) {
                 bool startup_ok = run_startup_benchmark(
@@ -2074,17 +2039,13 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
             }
 
             if (workload_count > 0) {
-                report_styled(color_dim, "  Benchmarks\n");
-                size_t before = summaries.count;
                 bool benchmark_ok = run_terminal(
                     &config->terminals[i], config, selection, executable_path,
                     WORKER_PHASE_BENCHMARK, &summaries, NULL, false, NULL);
-                if (!benchmark_ok) all_ok = false;
-                size_t collected = summaries.count - before;
-                report_styled(benchmark_ok ? color_green : color_red,
-                              "  %s: %zu benchmark result%s\n",
-                              benchmark_ok ? "Finished" : "Failed", collected,
-                              collected == 1 ? "" : "s");
+                if (!benchmark_ok) {
+                    all_ok = false;
+                    report_styled(color_red, "  Failed: Benchmarks\n");
+                }
             }
         }
         report_styled(NULL, "\n");

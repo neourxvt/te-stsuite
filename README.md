@@ -172,8 +172,8 @@ samples and at least three seconds of measured startup time by default. The
 startup result reports the mean wall time, 90th percentile, and standard
 deviation across those launches. `max_samples` can cap the startup sample count
 as well as workload samples. Terminal stdout and stderr are shown and recorded
-once during the first warmup; output from process isolation checks, later
-warmups, and startup samples is suppressed.
+once per terminal during its warmup; output from process isolation checks and
+startup samples is suppressed.
 Each later result measures PTY writes after the
 separate warmup phase. The printed workload wall time covers all measured
 writes; the write average, 90th percentile, and standard deviation cover
@@ -185,10 +185,10 @@ directory as `.log.te-stsuite-YYYYMMDD-HHMMSS.log` and
 `.log.te-stsuite-YYYYMMDD-HHMMSS.jsonl`.
 
 The JSONL file is compact and contains run metadata, one process isolation
-check record per terminal, at most one warmup output record, one flat result
-record per measured terminal and benchmark, and one end record. The warmup
-output record includes captured stdout and stderr from the first warmup.
-Output from process isolation checks, later warmups, and startup samples is
+check record per terminal, at most one warmup output record per terminal, one
+flat result record per measured terminal and benchmark, and one end record.
+Each warmup output record includes that terminal's captured stdout and stderr.
+Output from process isolation checks and startup samples is
 suppressed and is not recorded.
 Results are not duplicated for printed summaries. The schema version is 5.
 Durations use seconds or milliseconds as named, memory uses
