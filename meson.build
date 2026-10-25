@@ -16,10 +16,6 @@ if host_machine.system() != 'linux'
 endif
 
 cc = meson.get_compiler('c')
-if cc.get_define('__GLIBC__', prefix: '#include <features.h>') != ''
-  error('te-stsuite must be built with a musl-targeting compiler')
-endif
-
 math = cc.find_library('m', required: true)
 
 python = import('python').find_installation('python3', required: true)
@@ -104,6 +100,5 @@ executable(
   sources,
   include_directories: inc,
   dependencies: [math],
-  link_args: ['-static'],
   install: false,
 )

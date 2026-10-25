@@ -6,9 +6,10 @@ benchmarks from `vtebench`, including its missing-glyph workload.
 
 ## Build and run
 
-The build requires Meson 1.3 or newer, Python 3, `musl-gcc`, and Linux procfs.
-The checked-in Meson native file selects musl-gcc, and `meson.build` links the executable
-statically. It also maps checkout and build paths out of the binary, rejects
+The build requires Meson 1.3 or newer, Ninja, Python 3, a C17 compiler, and Linux procfs.
+Meson uses the system C compiler and its default libc, such as glibc on glibc-based
+distributions or musl on Alpine, with dynamic linking by default.
+The build maps checkout and build paths out of the binary, rejects
 compile-time date/time macros, and embeds benchmark payloads in the executable.
 Executable binaries built from the same source and toolchain are byte-identical
 across checkout and build paths.
@@ -18,16 +19,17 @@ Build with the convenience script:
 ./build.sh
 ```
 
-To configure Meson directly, pass the native file on the initial setup:
+To configure Meson directly:
 
 ```sh
-meson setup build --native-file meson/musl.ini
+meson setup build
 meson compile -C build
 ```
 
-Meson chooses its compiler during setup, so direct builds need this native
-file too. To use a different musl compiler, update the `c` entry in
-`meson/musl.ini`.
+To select a different compiler, set `CC` when first configuring the build
+directory, for example `CC=clang ./build.sh`. Meson caches the compiler choice;
+use a fresh build directory when switching compilers, including when moving
+from an existing musl-gcc build to the system compiler.
 
 Start with [example.toml](example.toml), or create a TOML file with one named
 table for each terminal. Each `cmd` must contain one standalone `{CMD}` word
