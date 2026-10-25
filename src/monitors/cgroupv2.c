@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -18,7 +19,7 @@ struct CgroupScope {
     char *worker_path;
     char *terminal_membership;
     char *worker_membership;
-    char error[256];
+    char error[512];
     bool ready;
     bool base_created;
     bool terminal_created;
@@ -221,6 +222,34 @@ static void remove_partial_scope(CgroupScope *scope) {
     }
 }
 
+/* Explain cgroup creation failures using the parent permissions and mount state. */
+static void describe_cgroup_create_error(CgroupScope *scope,
+                                         const char *parent_path,
+                                         const char *child,
+                                         int saved_errno) {
+    struct stat parent_stat;
+    struct statvfs filesystem_stat;
+    char parent_detail[192] = {0};
+    char mount_detail[64] = {0};
+    if (stat(parent_path, &parent_stat) == 0) {
+        snprintf(parent_detail, sizeof(parent_detail),
+                 "; parent mode %04o owner %lu:%lu, process uid %lu",
+                 (unsigned)(parent_stat.st_mode & 07777),
+                 (unsigned long)parent_stat.st_uid,
+                 (unsigned long)parent_stat.st_gid,
+                 (unsigned long)geteuid());
+    }
+    if (statvfs(parent_path, &filesystem_stat) == 0 &&
+        (filesystem_stat.f_flag & ST_RDONLY) != 0) {
+        snprintf(mount_detail, sizeof(mount_detail),
+                 "; cgroup mount is read-only");
+    }
+    snprintf(scope->error, sizeof(scope->error),
+             "cannot create cgroup '%s': %s%s%s", child,
+             strerror(saved_errno), parent_detail, mount_detail);
+    errno = saved_errno;
+}
+
 /* Create sibling terminal and worker groups under the caller's delegation. */
 CgroupScope *cgroup_scope_create(void) {
     CgroupScope *scope = calloc(1, sizeof(*scope));
@@ -248,10 +277,10 @@ CgroupScope *cgroup_scope_create(void) {
              (unsigned long long)now.tv_nsec);
     scope->base_path = child_path(parent, group_name);
     char *membership_base = child_path(membership, group_name);
-    free(parent);
     free(membership);
     if (scope->base_path == NULL || membership_base == NULL) {
         snprintf(scope->error, sizeof(scope->error), "out of memory creating cgroup path");
+        free(parent);
         free(scope->base_path);
         scope->base_path = NULL;
         free(membership_base);
@@ -276,11 +305,14 @@ CgroupScope *cgroup_scope_create(void) {
         scope->worker_path = NULL;
         scope->terminal_membership = NULL;
         scope->worker_membership = NULL;
+        free(parent);
         return scope;
     }
     if (mkdir(scope->base_path, 0700) != 0) {
-        snprintf(scope->error, sizeof(scope->error),
-                 "cannot create delegated cgroup children: %s", strerror(errno));
+        int saved_errno = errno;
+        describe_cgroup_create_error(scope, parent, scope->base_path,
+                                     saved_errno);
+        free(parent);
         free(scope->base_path);
         free(scope->terminal_path);
         free(scope->worker_path);
@@ -293,6 +325,7 @@ CgroupScope *cgroup_scope_create(void) {
         scope->worker_membership = NULL;
         return scope;
     }
+    free(parent);
     scope->base_created = true;
     if (mkdir(scope->terminal_path, 0700) == 0) {
         scope->terminal_created = true;

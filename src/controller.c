@@ -42,6 +42,16 @@ typedef struct {
     size_t capacity;
 } SummaryList;
 
+/* Preserve each terminal's isolation result for the all-terminal check report. */
+typedef struct {
+    const char *terminal;
+    MonitorIsolation isolation;
+    char detail[512];
+    bool recorded;
+    bool passed;
+    bool worker_moved;
+} CgroupCheckResult;
+
 static FILE *log_file;
 static FILE *jsonl_file;
 static size_t jsonl_result_count;
@@ -697,6 +707,42 @@ static void jsonl_write_cgroup_check(const char *terminal,
     jsonl_write_doc(doc, object);
 }
 
+/* Return a short status label for both the check table and structured log. */
+static const char *cgroup_check_status(MonitorIsolation isolation) {
+    switch (isolation) {
+        case MONITOR_ISOLATION_INSIDE: return "inside";
+        case MONITOR_ISOLATION_OUTSIDE: return "outside";
+        case MONITOR_ISOLATION_UNAVAILABLE: return "unavailable";
+    }
+    return "unavailable";
+}
+
+/* Show all selected terminals together when isolation prevents the run. */
+static void print_cgroup_check_summary(const CgroupCheckResult *results,
+                                      size_t count) {
+    size_t terminal_width = strlen("Terminal");
+    for (size_t i = 0; i < count; ++i) {
+        size_t length = strlen(results[i].terminal);
+        if (length > terminal_width) terminal_width = length;
+    }
+    report_styled(color_bold_cyan, "\nCgroup check summary\n");
+    report("%-*s  %-12s  %s\n", (int)terminal_width, "Terminal",
+           "Status", "Detail");
+    for (size_t i = 0; i < terminal_width + 2 + 12 + 2 + 6; ++i) {
+        report("-");
+    }
+    report("\n");
+    for (size_t i = 0; i < count; ++i) {
+        const CgroupCheckResult *result = &results[i];
+        const char *color = result->passed ? color_green : color_red;
+        report_styled(color, "%-*s  %-12s  %s\n",
+                      (int)terminal_width, result->terminal,
+                      cgroup_check_status(result->isolation),
+                      result->detail[0] == '\0' ? "check did not complete"
+                                                 : result->detail);
+    }
+}
+
 /* Mark the end of a run with success and the number of result rows emitted. */
 static void jsonl_write_end(bool success) {
     yyjson_mut_val *object = NULL;
@@ -840,7 +886,7 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                          char *active_benchmark, size_t *active_bytes,
                          bool *active, bool *ready, bool *done,
                          bool *worker_failed, bool include_startup,
-                         bool *isolation_outside, WorkerPhase phase,
+                         CgroupCheckResult *check_result, WorkerPhase phase,
                          uint64_t launch_ns) {
     if (line[0] == 'R' && line[1] == ' ') {
         long worker_pid = 0;
@@ -854,13 +900,19 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
             MonitorIsolation isolation = monitor_check_isolation(
                 monitor, (pid_t)terminal_pid, (pid_t)worker_pid,
                 worker_moved != 0, &detail);
-            jsonl_write_cgroup_check(terminal->name, isolation, detail,
-                                    worker_moved != 0);
+            if (check_result != NULL) {
+                check_result->isolation = isolation;
+                check_result->recorded = true;
+                check_result->passed = isolation == MONITOR_ISOLATION_INSIDE;
+                check_result->worker_moved = worker_moved != 0;
+                snprintf(check_result->detail, sizeof(check_result->detail),
+                         "%s", detail == NULL ? monitor_scope_error(monitor)
+                                               : detail);
+            }
             if (isolation == MONITOR_ISOLATION_INSIDE) {
                 report_styled(color_green, "  Cgroup check: inside (%s)\n",
                               detail == NULL ? "ok" : detail);
             } else if (isolation == MONITOR_ISOLATION_OUTSIDE) {
-                *isolation_outside = true;
                 report_styled(color_red, "  Cgroup check: outside (%s)\n",
                               detail == NULL ? "placement failed" : detail);
             } else {
@@ -947,7 +999,8 @@ static bool run_terminal(const TerminalConfig *terminal,
                         const RunSelection *selection,
                         const char *executable_path,
                         WorkerPhase phase,
-                        SummaryList *summaries) {
+                        SummaryList *summaries,
+                        CgroupCheckResult *check_result) {
     char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     int listener = open_control_socket(socket_path, sizeof(socket_path));
     if (listener < 0) {
@@ -1116,7 +1169,6 @@ static bool run_terminal(const TerminalConfig *terminal,
     bool ready = false;
     bool done = false;
     bool worker_failed = false;
-    bool isolation_outside = false;
     bool active = false;
     char active_benchmark[128] = {0};
     size_t active_bytes = 0;
@@ -1174,7 +1226,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                                                 &worker_failed,
                                                 selection_includes_benchmark(
                                                     selection, "startup"),
-                                                &isolation_outside, phase,
+                                                check_result, phase,
                                                 launch_ns);
                     consumed = i + 1;
                     if (!handled && !done) {
@@ -1216,7 +1268,9 @@ static bool run_terminal(const TerminalConfig *terminal,
     stop_terminal(child, child_reaped, child_status);
     monitor_destroy(monitor);
     if (config_path[0] != '\0') unlink(config_path);
-    return ready && done && !worker_failed && !isolation_outside;
+    return ready && done && !worker_failed &&
+           (phase != WORKER_PHASE_CHECK ||
+            (check_result != NULL && check_result->passed));
 }
 
 /* Run configured terminals sequentially and write both per-terminal and final views. */
@@ -1247,27 +1301,88 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                   monitor_backend_name(config->monitor_backend));
     report_styled(color_dim, "Text log       %s\n", log_path);
     report_styled(color_dim, "JSONL log      %s\n\n", jsonl_path);
-    bool all_ok = true;
     size_t selected_terminal_count = 0;
     for (size_t i = 0; i < config->terminal_count; ++i) {
         if (terminal_is_selected(&config->terminals[i], selection)) {
             selected_terminal_count++;
         }
     }
+    CgroupCheckResult *check_results =
+        calloc(selected_terminal_count == 0 ? 1 : selected_terminal_count,
+               sizeof(*check_results));
+    if (check_results == NULL) {
+        report_styled(color_red,
+                      "cvtebench: cannot allocate cgroup check results\n");
+        jsonl_write_end(false);
+        report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
+                      log_path, jsonl_path);
+        fclose(jsonl_file);
+        jsonl_file = NULL;
+        fclose(log_file);
+        log_file = NULL;
+        return 1;
+    }
+
+    report_styled(color_bold_cyan, "Cgroup placement checks\n");
+    size_t terminal_number = 0;
+    size_t check_index = 0;
+    bool checks_passed = true;
+    for (size_t i = 0; i < config->terminal_count; ++i) {
+        if (!terminal_is_selected(&config->terminals[i], selection)) continue;
+        terminal_number++;
+        CgroupCheckResult *result = &check_results[check_index++];
+        result->terminal = config->terminals[i].name;
+        result->isolation = MONITOR_ISOLATION_UNAVAILABLE;
+        snprintf(result->detail, sizeof(result->detail),
+                 "check did not complete; see the terminal error above");
+        report_styled(color_cyan, "[%zu/%zu] %s\n", terminal_number,
+                      selected_terminal_count, config->terminals[i].name);
+        bool ok = run_terminal(&config->terminals[i], config, selection,
+                               executable_path, WORKER_PHASE_CHECK,
+                               &summaries, result);
+        if (!result->recorded) {
+            snprintf(result->detail, sizeof(result->detail),
+                     "check did not complete; see the terminal error above");
+        } else if (!ok && result->passed) {
+            result->passed = false;
+            result->isolation = MONITOR_ISOLATION_UNAVAILABLE;
+            snprintf(result->detail, sizeof(result->detail),
+                     "terminal or worker exited before the check completed");
+        }
+        jsonl_write_cgroup_check(result->terminal, result->isolation,
+                                 result->detail, result->worker_moved);
+        report_styled(ok ? color_green : color_red,
+                      "  %s: Cgroup check\n\n",
+                      ok ? "Finished" : "Failed");
+        if (!result->passed) checks_passed = false;
+    }
+
+    if (!checks_passed) {
+        report_styled(color_red,
+                      "\nBenchmark run stopped before warmup because cgroup checks failed.\n");
+        print_cgroup_check_summary(check_results, check_index);
+        jsonl_write_end(false);
+        report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
+                      log_path, jsonl_path);
+        free(check_results);
+        free(summaries.items);
+        fclose(jsonl_file);
+        jsonl_file = NULL;
+        fclose(log_file);
+        log_file = NULL;
+        return 1;
+    }
+
+    bool all_ok = true;
     const WorkerPhase phases[] = {
-        WORKER_PHASE_CHECK,
         WORKER_PHASE_WARMUP,
         WORKER_PHASE_BENCHMARK,
     };
-    const char *const phase_titles[] = {
-        "Cgroup placement checks",
-        "Warmup",
-        "Benchmarks",
-    };
+    const char *const phase_titles[] = {"Warmup", "Benchmarks"};
     for (size_t phase_index = 0;
          phase_index < sizeof(phases) / sizeof(phases[0]); ++phase_index) {
         report_styled(color_bold_cyan, "%s\n", phase_titles[phase_index]);
-        size_t terminal_number = 0;
+        terminal_number = 0;
         for (size_t i = 0; i < config->terminal_count; ++i) {
             if (!terminal_is_selected(&config->terminals[i], selection)) continue;
             terminal_number++;
@@ -1277,18 +1392,18 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
             size_t before = summaries.count;
             bool ok = run_terminal(&config->terminals[i], config, selection,
                                    executable_path, phases[phase_index],
-                                   &summaries);
+                                   &summaries, NULL);
             if (!ok) all_ok = false;
             size_t collected = summaries.count - before;
-            if (phase_index == 2) {
+            if (phase_index == 1) {
                 report_styled(ok ? color_green : color_red,
                               "  %s: %zu benchmark result%s\n\n",
                               ok ? "Finished" : "Failed", collected,
                               collected == 1 ? "" : "s");
             } else {
-                const char *label = phase_index == 0 ? "Cgroup check" : "Warmup";
-                report_styled(ok ? color_green : color_red, "  %s: %s\n\n",
-                              ok ? "Finished" : "Failed", label);
+                report_styled(ok ? color_green : color_red,
+                              "  %s: Warmup\n\n",
+                              ok ? "Finished" : "Failed");
             }
         }
     }
@@ -1300,6 +1415,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
                   log_path, jsonl_path);
 
+    free(check_results);
     free(summaries.items);
     if (fclose(jsonl_file) != 0) all_ok = false;
     jsonl_file = NULL;
