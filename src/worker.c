@@ -68,6 +68,36 @@ static int open_controller_pipe(const char *path) {
     return -1;
 }
 
+/* Let window-manager startup resizes settle before fixing the workload grid. */
+static bool wait_for_terminal_size(struct winsize *size, unsigned timeout_seconds) {
+    const uint64_t quiet_ns = 100000000ULL;
+    uint64_t now = monotonic_now_ns();
+    uint64_t stable_since = now;
+    uint64_t deadline = now + (uint64_t)timeout_seconds * 1000000000ULL;
+    *size = (struct winsize){0};
+
+    while (now < deadline) {
+        struct winsize current = {0};
+        int status = ioctl(STDOUT_FILENO, TIOCGWINSZ, &current);
+        if (status < 0 && errno != EINTR) return false;
+        now = monotonic_now_ns();
+        if (status < 0 || current.ws_row == 0 || current.ws_col == 0 ||
+            current.ws_row != size->ws_row || current.ws_col != size->ws_col) {
+            *size = current;
+            stable_since = now;
+        } else if (now - stable_since >= quiet_ns) {
+            return true;
+        }
+
+        /* Use elapsed time so interrupted sleeps cannot shorten settling. */
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = 10000000};
+        if (nanosleep(&pause, NULL) != 0 && errno != EINTR) return false;
+        now = monotonic_now_ns();
+    }
+    errno = ETIMEDOUT;
+    return false;
+}
+
 /* Build one repeatable sample and report generation errors to the controller. */
 static bool prepare_benchmark(const Benchmark *benchmark,
                               const BenchContext *context,
@@ -188,13 +218,6 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         close(control_fd);
         return 1;
     }
-    struct winsize size = {0};
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &size) != 0 ||
-        size.ws_row == 0 || size.ws_col == 0) {
-        size.ws_row = 24;
-        size.ws_col = 80;
-    }
-
     if (!send_event(control_fd, "R %ld %ld %u\n", (long)getpid(),
                     (long)getppid(), worker_moved ? 1U : 0U)) {
         close(control_fd);
@@ -220,6 +243,15 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         send_event(control_fd, "D\n");
         close(control_fd);
         return 0;
+    }
+
+    /* Startup timing and isolation checks do not need a settled workload grid. */
+    struct winsize size = {0};
+    if (!wait_for_terminal_size(&size, config->options.startup_timeout_seconds)) {
+        send_event(control_fd, "F cannot determine stable terminal dimensions: %s\n",
+                   strerror(errno));
+        close(control_fd);
+        return 1;
     }
 
     BenchContext context = {.rows = size.ws_row, .columns = size.ws_col};
