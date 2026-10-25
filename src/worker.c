@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 #include <errno.h>
 #include <math.h>
@@ -117,7 +117,7 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
     bool worker_moved = selection != NULL && selection->worker_cgroup_moved;
     int socket_fd = connect_controller(socket_path);
     if (socket_fd < 0) {
-        fprintf(stderr, "cvtebench: cannot connect to controller: %s\n",
+        fprintf(stderr, "te-stsuite: cannot connect to controller: %s\n",
                 strerror(errno));
         return 1;
     }
@@ -146,8 +146,8 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
     }
 
     BenchContext context = {.rows = size.ws_row, .columns = size.ws_col};
-    for (size_t index = 1; index < cvtebench_benchmark_count; ++index) {
-        const Benchmark *benchmark = &cvtebench_benchmarks[index];
+    for (size_t index = 1; index < te_stsuite_benchmark_count; ++index) {
+        const Benchmark *benchmark = &te_stsuite_benchmarks[index];
         if (!selection_includes_benchmark(selection, benchmark->name)) {
             continue;
         }

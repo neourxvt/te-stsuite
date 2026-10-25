@@ -4,12 +4,12 @@
 set -eu
 
 if [ "$#" -lt 1 ]; then
-    printf 'Usage: %s CONFIG.toml [cvtebench options...]\n' "$0" >&2
+    printf 'Usage: %s CONFIG.toml [te-stsuite options...]\n' "$0" >&2
     exit 2
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-runner="$script_dir/build/cvtebench"
+runner="$script_dir/build/te-stsuite"
 
 # Prefer systemd's native delegation when a user manager is available.
 container_manager=

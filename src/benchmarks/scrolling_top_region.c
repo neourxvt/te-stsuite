@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Scroll only the top part of the screen while preserving the final row. */
 int bench_scrolling_top_region_prepare(BenchData *data,

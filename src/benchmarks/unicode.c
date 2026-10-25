@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 #include <stdio.h>
 

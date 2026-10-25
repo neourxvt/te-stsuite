@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Restrict scrolling to roughly the top half of the alternate screen. */
 int bench_scrolling_bottom_small_region_prepare(BenchData *data,

@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Paint every visible cell with changing bold, italic, underline, and colors. */
 int bench_dense_cells_prepare(BenchData *data, const BenchContext *context,

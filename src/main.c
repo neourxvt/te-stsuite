@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,24 +30,25 @@ static void print_usage(const char *program) {
     printf("TOML monitor defaults to cgroupv2; choose \"polling\" to use /proc.\n");
     printf("Cgroup placement checks run automatically before warmup and measurement.\n\n");
     printf("A terminal name selects all its config variants; a name such as\n");
-    printf("kitty/compact selects one variant. Workloads:\n  ");
-    size_t line_length = 2;
-    for (size_t i = 0; i < cvtebench_benchmark_count; ++i) {
-        size_t name_length = strlen(cvtebench_benchmarks[i].name);
-        size_t separator_length = i == 0 ? 0 : 2;
-        if (line_length + separator_length + name_length > 78) {
-            printf("\n  ");
-            line_length = 2;
-            separator_length = 0;
-        }
-        if (separator_length != 0) {
-            printf(", ");
-            line_length += separator_length;
-        }
-        printf("%s", cvtebench_benchmarks[i].name);
-        line_length += name_length;
+    printf("kitty/compact selects one variant. Workloads:\n");
+    const char *benchmark_names[te_stsuite_benchmark_count];
+    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
+        benchmark_names[i] = te_stsuite_benchmarks[i].name;
     }
-    printf("\nWith no selectors, all configured terminals and workloads run.\n");
+    /* Keep the help order alphabetical without changing workload execution order. */
+    for (size_t i = 1; i < te_stsuite_benchmark_count; ++i) {
+        const char *name = benchmark_names[i];
+        size_t j = i;
+        while (j > 0 && strcmp(benchmark_names[j - 1], name) > 0) {
+            benchmark_names[j] = benchmark_names[j - 1];
+            --j;
+        }
+        benchmark_names[j] = name;
+    }
+    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
+        printf("  %s\n", benchmark_names[i]);
+    }
+    printf("With no selectors, all configured terminals and workloads run.\n");
 }
 
 /* Store one selector from argv without copying its process-lifetime string. */
@@ -104,27 +105,27 @@ int main(int argc, char **argv) {
             bool is_terminal = strcmp(argv[i], "--terminal") == 0 ||
                                strcmp(argv[i], "-t") == 0;
             if (++i >= argc || argv[i][0] == '-') {
-                fprintf(stderr, "cvtebench: %s needs a name\n",
+                fprintf(stderr, "te-stsuite: %s needs a name\n",
                         is_terminal ? "--terminal/-t" : "--benchmark/-b");
                 arguments_valid = false;
                 break;
             }
             SelectorList *list = is_terminal ? &terminals : &benchmarks;
             if (!selector_list_add(list, argv[i])) {
-                fprintf(stderr, "cvtebench: out of memory storing selectors\n");
+                fprintf(stderr, "te-stsuite: out of memory storing selectors\n");
                 arguments_valid = false;
                 break;
             }
         } else if (strcmp(argv[i], "--worker-socket") == 0) {
             if (++i >= argc) {
-                fprintf(stderr, "cvtebench: --worker-socket needs a path\n");
+                fprintf(stderr, "te-stsuite: --worker-socket needs a path\n");
                 arguments_valid = false;
                 break;
             }
             socket_path = argv[i];
         } else if (strcmp(argv[i], "--worker-phase") == 0) {
             if (++i >= argc) {
-                fprintf(stderr, "cvtebench: --worker-phase needs a phase\n");
+                fprintf(stderr, "te-stsuite: --worker-phase needs a phase\n");
                 arguments_valid = false;
                 break;
             }
@@ -136,13 +137,13 @@ int main(int argc, char **argv) {
             } else if (strcmp(argv[i], "benchmark") == 0) {
                 worker_phase = WORKER_PHASE_BENCHMARK;
             } else {
-                fprintf(stderr, "cvtebench: unknown worker phase '%s'\n", argv[i]);
+                fprintf(stderr, "te-stsuite: unknown worker phase '%s'\n", argv[i]);
                 arguments_valid = false;
                 break;
             }
         } else if (strcmp(argv[i], "--worker-cgroup") == 0) {
             if (++i >= argc) {
-                fprintf(stderr, "cvtebench: --worker-cgroup needs a path\n");
+                fprintf(stderr, "te-stsuite: --worker-cgroup needs a path\n");
                 arguments_valid = false;
                 break;
             }
@@ -152,13 +153,13 @@ int main(int argc, char **argv) {
                    strcmp(argv[i], "-h") == 0) {
             help = true;
         } else if (argv[i][0] == '-') {
-            fprintf(stderr, "cvtebench: unknown option '%s'\n", argv[i]);
+            fprintf(stderr, "te-stsuite: unknown option '%s'\n", argv[i]);
             arguments_valid = false;
             break;
         } else if (config_path == NULL) {
             config_path = argv[i];
         } else {
-            fprintf(stderr, "cvtebench: only one TOML configuration is accepted\n");
+            fprintf(stderr, "te-stsuite: only one TOML configuration is accepted\n");
             arguments_valid = false;
             break;
         }
@@ -177,26 +178,26 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (config_path == NULL) {
-        fprintf(stderr, "cvtebench: an input TOML configuration is required\n");
+        fprintf(stderr, "te-stsuite: an input TOML configuration is required\n");
         print_usage(argv[0]);
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
     }
     if (socket_path != NULL && (!run || validate)) {
-        fprintf(stderr, "cvtebench: --worker-socket requires --run\n");
+        fprintf(stderr, "te-stsuite: --worker-socket requires --run\n");
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
     }
     if (private_worker_option && socket_path == NULL) {
-        fprintf(stderr, "cvtebench: worker phase and cgroup options require --worker-socket\n");
+        fprintf(stderr, "te-stsuite: worker phase and cgroup options require --worker-socket\n");
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
     }
     if (run && validate) {
-        fprintf(stderr, "cvtebench: --run and --validate cannot be combined\n");
+        fprintf(stderr, "te-stsuite: --run and --validate cannot be combined\n");
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
@@ -217,13 +218,13 @@ int main(int argc, char **argv) {
     AppConfig config;
     char error[512] = {0};
     if (!config_load(config_path, &config, error, sizeof(error))) {
-        fprintf(stderr, "cvtebench: %s\n", error);
+        fprintf(stderr, "te-stsuite: %s\n", error);
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
     }
     if (!selection_validate(&config, &selection, error, sizeof(error))) {
-        fprintf(stderr, "cvtebench: %s\n", error);
+        fprintf(stderr, "te-stsuite: %s\n", error);
         config_free(&config);
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
@@ -239,7 +240,7 @@ int main(int argc, char **argv) {
     } else {
         char *executable_path = self_path();
         if (executable_path == NULL) {
-            fprintf(stderr, "cvtebench: cannot resolve the running executable path\n");
+            fprintf(stderr, "te-stsuite: cannot resolve the running executable path\n");
             result = 1;
         } else {
             result = controller_run(&config, &selection, executable_path);

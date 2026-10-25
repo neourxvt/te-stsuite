@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Encode a Unicode scalar value as its UTF-8 byte sequence. */
 static bool append_utf8(Buffer *buffer, uint32_t codepoint) {

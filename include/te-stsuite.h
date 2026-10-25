@@ -1,5 +1,5 @@
-#ifndef CVTEBENCH_H
-#define CVTEBENCH_H
+#ifndef TE_STSUITE_H
+#define TE_STSUITE_H
 
 #include "monitor.h"
 
@@ -79,8 +79,8 @@ typedef struct {
     bool worker_cgroup_moved;
 } RunSelection;
 
-extern const Benchmark cvtebench_benchmarks[];
-extern const size_t cvtebench_benchmark_count;
+extern const Benchmark te_stsuite_benchmarks[];
+extern const size_t te_stsuite_benchmark_count;
 
 /* Buffer operations keep benchmark generation independent of the runner. */
 void buffer_init(Buffer *buffer);

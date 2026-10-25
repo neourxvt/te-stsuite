@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "cvtebench.h"
+#include "te-stsuite.h"
 #include "yyjson.h"
 
 #include <errno.h>
@@ -106,8 +106,8 @@ bool selection_validate(const AppConfig *config, const RunSelection *selection,
     }
     for (size_t i = 0; i < selection->benchmark_count; ++i) {
         bool found = false;
-        for (size_t j = 0; j < cvtebench_benchmark_count; ++j) {
-            if (strcmp(cvtebench_benchmarks[j].name,
+        for (size_t j = 0; j < te_stsuite_benchmark_count; ++j) {
+            if (strcmp(te_stsuite_benchmarks[j].name,
                        selection->benchmark_names[i]) == 0) {
                 found = true;
                 break;
@@ -374,7 +374,7 @@ static bool write_inline_config(const TerminalConfig *terminal, char *path,
         path[0] = '\0';
         return true;
     }
-    if (snprintf(path, path_size, "/tmp/cvtebench-config-XXXXXX") >=
+    if (snprintf(path, path_size, "/tmp/te-stsuite-config-XXXXXX") >=
         (int)path_size) {
         snprintf(error, error_size, "temporary config path buffer is too small");
         return false;
@@ -562,7 +562,7 @@ static void print_collective_summary(const SummaryList *summaries) {
 static bool jsonl_error(void) {
     if (!jsonl_failed) {
         int saved_errno = errno;
-        fprintf(stderr, "cvtebench: JSONL logging failed: %s\n",
+        fprintf(stderr, "te-stsuite: JSONL logging failed: %s\n",
                 saved_errno == 0 ? "serialization error" : strerror(saved_errno));
     }
     jsonl_failed = true;
@@ -741,7 +741,7 @@ static void print_cgroup_check_summary(const CgroupCheckResult *results,
                       result->detail[0] == '\0' ? "check did not complete"
                                                  : result->detail);
     }
-    report("\nRun cvtebench inside a writable cgroup v2 subtree delegated by\n");
+    report("\nRun te-stsuite inside a writable cgroup v2 subtree delegated by\n");
     report("the system or container manager. Do not change permissions on\n");
     report("/sys/fs/cgroup itself.\n");
 }
@@ -785,9 +785,9 @@ static bool open_run_logs(char *log_path, size_t log_path_size,
         char suffix_text[16] = "";
         if (suffix > 0) snprintf(suffix_text, sizeof(suffix_text), "-%u", suffix);
         int log_length = snprintf(log_path, log_path_size,
-                                  "cvtebench-%s%s.log", stamp, suffix_text);
+                                  "te-stsuite-%s%s.log", stamp, suffix_text);
         int jsonl_length = snprintf(jsonl_path, jsonl_path_size,
-                                    "cvtebench-%s%s.jsonl", stamp, suffix_text);
+                                    "te-stsuite-%s%s.jsonl", stamp, suffix_text);
         if (log_length < 0 || (size_t)log_length >= log_path_size ||
             jsonl_length < 0 || (size_t)jsonl_length >= jsonl_path_size) {
             errno = ENAMETOOLONG;
@@ -842,7 +842,7 @@ static bool open_run_logs(char *log_path, size_t log_path_size,
 static int open_control_socket(char *path, size_t path_size) {
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) return -1;
-    snprintf(path, path_size, "/tmp/cvtebench-%ld-%llu.sock", (long)getpid(),
+    snprintf(path, path_size, "/tmp/te-stsuite-%ld-%llu.sock", (long)getpid(),
              (unsigned long long)(monotonic_now_ns() % 1000000000ULL));
     struct sockaddr_un address = {.sun_family = AF_UNIX};
     if (strlen(path) >= sizeof(address.sun_path)) {
@@ -1080,7 +1080,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         CPU_SET(0, &cpus);
         if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
             dprintf(STDERR_FILENO,
-                    "cvtebench: cannot pin terminal to CPU 0: %s\n",
+                    "te-stsuite: cannot pin terminal to CPU 0: %s\n",
                     strerror(errno));
             _exit(126);
         }
@@ -1092,7 +1092,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         close(gate[0]);
         if (gate_result != 1 || release != 'G') _exit(126);
         execvp(argv[0], argv);
-        dprintf(STDERR_FILENO, "cvtebench: cannot start '%s': %s\n",
+        dprintf(STDERR_FILENO, "te-stsuite: cannot start '%s': %s\n",
                 argv[0], strerror(errno));
         _exit(127);
     }
@@ -1188,11 +1188,11 @@ static bool run_terminal(const TerminalConfig *terminal,
     uint64_t seconds_limit = UINT64_MAX / 1000000000ULL;
     uint64_t worker_allowance;
     if (seconds_per_benchmark >
-        (seconds_limit - 10) / cvtebench_benchmark_count) {
+        (seconds_limit - 10) / te_stsuite_benchmark_count) {
         worker_allowance = UINT64_MAX;
     } else {
         worker_allowance = seconds_per_benchmark *
-                           cvtebench_benchmark_count * 1000000000ULL +
+                           te_stsuite_benchmark_count * 1000000000ULL +
                            10000000000ULL;
     }
     uint64_t worker_deadline = deadline > UINT64_MAX - worker_allowance
@@ -1290,14 +1290,14 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     if (!open_run_logs(log_path, sizeof(log_path), jsonl_path,
                        sizeof(jsonl_path), started_at, sizeof(started_at),
                        &log_file, &jsonl_file)) {
-        fprintf(stderr, "cvtebench: cannot create run logs: %s\n",
+        fprintf(stderr, "te-stsuite: cannot create run logs: %s\n",
                 strerror(errno));
         return 1;
     }
 
     SummaryList summaries = {0};
     jsonl_write_run(config, started_at);
-    report_styled(color_bold_cyan, "cvtebench\n");
+    report_styled(color_bold_cyan, "te-stsuite\n");
     report_styled(color_dim, "Terminal emulator benchmark suite\n");
     report_styled(color_dim, "Configuration  %s\n", config->path);
     report_styled(color_dim, "Monitor        %s\n",
@@ -1315,7 +1315,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                sizeof(*check_results));
     if (check_results == NULL) {
         report_styled(color_red,
-                      "cvtebench: cannot allocate cgroup check results\n");
+                      "te-stsuite: cannot allocate cgroup check results\n");
         jsonl_write_end(false);
         report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
                       log_path, jsonl_path);

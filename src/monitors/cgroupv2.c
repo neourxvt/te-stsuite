@@ -272,7 +272,7 @@ CgroupScope *cgroup_scope_create(void) {
     char group_name[96];
     struct timespec now = {0};
     clock_gettime(CLOCK_MONOTONIC, &now);
-    snprintf(group_name, sizeof(group_name), "cvtebench-%ld-%llu",
+    snprintf(group_name, sizeof(group_name), "te-stsuite-%ld-%llu",
              (long)getpid(),
              (unsigned long long)now.tv_nsec);
     scope->base_path = child_path(parent, group_name);

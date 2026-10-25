@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Repaint the visible grid with plain single-width characters. */
 int bench_light_cells_prepare(BenchData *data, const BenchContext *context,

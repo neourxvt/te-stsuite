@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 #include <stdarg.h>
 #include <stdio.h>

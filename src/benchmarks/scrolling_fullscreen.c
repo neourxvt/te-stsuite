@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Scroll filled rows using each alphabetic glyph as the original script did. */
 int bench_scrolling_fullscreen_prepare(BenchData *data,

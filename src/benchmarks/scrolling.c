@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Fill the scrollback with the same 100001 lines used by the shell setup. */
 int bench_scrolling_prepare(BenchData *data, const BenchContext *context,

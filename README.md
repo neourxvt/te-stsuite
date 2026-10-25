@@ -1,6 +1,6 @@
-# cvtebench
+# te-stsuite
 
-`cvtebench` benchmarks terminal emulator startup and PTY rendering workloads on
+`te-stsuite` benchmarks terminal emulator startup and PTY rendering workloads on
 modern Linux. The workloads are implemented in C and are based on the built-in
 benchmarks from `vtebench`, including its missing-glyph workload.
 
@@ -31,7 +31,7 @@ file too. To use a different musl compiler, update the `c` entry in
 
 Start with [example.toml](example.toml), or create a TOML file with one named
 table for each terminal. Each `cmd` must contain one standalone `{CMD}` word
-where the cvtebench worker will be inserted:
+where the te-stsuite worker will be inserted:
 
 ```toml
 min_bytes = 1048576
@@ -61,8 +61,8 @@ Run the benchmark suite by default, or validate the configuration without
 launching any terminals:
 
 ```sh
-./build/cvtebench terminals.toml
-./build/cvtebench terminals.toml --validate
+./build/te-stsuite terminals.toml
+./build/te-stsuite terminals.toml --validate
 ./cycle.sh example.toml
 ```
 
@@ -72,9 +72,9 @@ config variants runs every variant, while a full name such as `kitty/compact`
 selects just that variant. Benchmark names are listed by `--help`.
 
 ```sh
-./build/cvtebench example.toml --terminal kitty --terminal xterm
-./build/cvtebench example.toml --benchmark startup --benchmark unicode
-./build/cvtebench example.toml --terminal kitty --benchmark scrolling
+./build/te-stsuite example.toml --terminal kitty --terminal xterm
+./build/te-stsuite example.toml --benchmark startup --benchmark vtebench-unicode
+./build/te-stsuite example.toml --terminal kitty --benchmark vtebench-scrolling
 ```
 
 Each configured terminal launches sequentially. The `{CMD}` placeholder is
@@ -95,7 +95,7 @@ the new process must own the measured PTY session.
 
 ## Measurements
 
-Before measuring, cvtebench checks whether each terminal and its worker are
+Before measuring, te-stsuite checks whether each terminal and its worker are
 placed in separate cgroups, then launches every selected terminal once for a
 separate warmup phase. It uses the same configured command for checks, warmup,
 and measured runs. The worker is placed in a sibling cgroup so its resource use
@@ -109,7 +109,7 @@ cgroup memory, not only process RSS. The `polling` backend retains the prior
 a percentage of one core and memory as time-weighted average and peak MiB. Each
 startup and workload result has its own interval. If cgroup delegation is not
 available, the check says so and cgroup resource values are recorded as null;
-cvtebench does not turn missing counters into zero or silently switch backends.
+te-stsuite does not turn missing counters into zero or silently switch backends.
 
 The startup result measures time from launching the configured command until
 the in-terminal worker is ready. Each later result measures PTY writes after
@@ -119,8 +119,8 @@ and exclude the per-sample reset and setup bytes.
 
 The report is printed after every benchmark and as a collective summary after
 all terminals finish. Matching logs are created in the current working
-directory as `cvtebench-YYYYMMDD-HHMMSS.log` and
-`cvtebench-YYYYMMDD-HHMMSS.jsonl`.
+directory as `te-stsuite-YYYYMMDD-HHMMSS.log` and
+`te-stsuite-YYYYMMDD-HHMMSS.jsonl`.
 
 The JSONL file is compact and contains run metadata, one cgroup check record per
 terminal, one flat result record per measured terminal and benchmark, and one
@@ -144,6 +144,7 @@ it does not extend `max_seconds`.
 
 ## Workloads
 
-The suite runs startup first, followed by cursor motion, dense cells, light
-cells, medium cells, scrolling, four scrolling-region workloads, scrolling
-fullscreen, synchronized medium cells, Unicode symbols, and missing glyphs.
+The suite runs startup first, followed by the ported `vtebench-*` workloads:
+cursor motion, dense cells, light cells, medium cells, scrolling, four
+scrolling-region workloads, scrolling fullscreen, synchronized medium cells,
+Unicode symbols, and missing glyphs.

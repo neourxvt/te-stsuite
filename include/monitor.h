@@ -1,5 +1,5 @@
-#ifndef CVTEBENCH_MONITOR_H
-#define CVTEBENCH_MONITOR_H
+#ifndef TE_STSUITE_MONITOR_H
+#define TE_STSUITE_MONITOR_H
 
 #include <stdbool.h>
 #include <stdint.h>

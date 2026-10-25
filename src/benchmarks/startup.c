@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* The controller measures startup from exec until the worker reports ready. */
 int bench_startup_prepare(BenchData *data, const BenchContext *context,

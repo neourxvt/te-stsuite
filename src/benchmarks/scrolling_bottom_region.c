@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Restrict scrolling to the first rows minus the final terminal row. */
 int bench_scrolling_bottom_region_prepare(BenchData *data,

@@ -1,5 +1,5 @@
 project(
-  'cvtebench',
+  'te-stsuite',
   'c',
   version: '0.1.0',
   meson_version: '>=1.3.0',
@@ -7,12 +7,12 @@ project(
 )
 
 if host_machine.system() != 'linux'
-  error('cvtebench supports modern Linux systems only')
+  error('te-stsuite supports modern Linux systems only')
 endif
 
 cc = meson.get_compiler('c')
 if cc.get_define('__GLIBC__', prefix: '#include <features.h>') != ''
-  error('cvtebench must be built with a musl-targeting compiler')
+  error('te-stsuite must be built with a musl-targeting compiler')
 endif
 
 math = cc.find_library('m', required: true)
@@ -23,9 +23,9 @@ source_relative_to_build = fs.relative_to(
   meson.current_build_dir(),
 )
 reproducibility_args = [
-  '-ffile-prefix-map=' + meson.current_build_dir() + '=/usr/src/cvtebench/build',
-  '-ffile-prefix-map=' + source_relative_to_build + '=/usr/src/cvtebench',
-  '-ffile-prefix-map=' + meson.current_source_dir() + '=/usr/src/cvtebench',
+  '-ffile-prefix-map=' + meson.current_build_dir() + '=/usr/src/te-stsuite/build',
+  '-ffile-prefix-map=' + source_relative_to_build + '=/usr/src/te-stsuite',
+  '-ffile-prefix-map=' + meson.current_source_dir() + '=/usr/src/te-stsuite',
   '-Werror=date-time',
 ]
 foreach arg : reproducibility_args
@@ -76,7 +76,7 @@ sources = files(
 subdir('data')
 
 executable(
-  'cvtebench',
+  'te-stsuite',
   sources,
   include_directories: inc,
   dependencies: [math],

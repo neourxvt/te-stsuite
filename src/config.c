@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-#include "cvtebench.h"
+#include "te-stsuite.h"
 #include "tomlc17.h"
 
 #include <limits.h>

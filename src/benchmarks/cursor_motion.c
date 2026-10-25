@@ -1,4 +1,4 @@
-#include "cvtebench.h"
+#include "te-stsuite.h"
 
 /* Emit the nested cursor spiral used by the original cursor-motion workload. */
 int bench_cursor_motion_prepare(BenchData *data, const BenchContext *context,
