@@ -143,6 +143,10 @@ void config_free(AppConfig *config) {
         free(config->terminals[i].xresources);
     }
     free(config->terminals);
+    for (size_t i = 0; i < config->benchmark_count; ++i) {
+        free(config->benchmarks[i].name);
+    }
+    free(config->benchmarks);
     memset(config, 0, sizeof(*config));
 }
 
@@ -265,7 +269,142 @@ static bool append_terminal(AppConfig *config, const char *name,
                              error, error_size);
 }
 
-/* Parse root runtime options and each named terminal table in source order. */
+/* Append an independently configured run while preserving suite order. */
+static bool append_benchmark(AppConfig *config, const Benchmark *benchmark,
+                             const char *name, const RunOptions *options,
+                             char *error, size_t error_size) {
+    char *name_copy = strdup(name);
+    if (name_copy == NULL) goto memory_error;
+    BenchmarkRun *runs = realloc(config->benchmarks,
+                                 (config->benchmark_count + 1) * sizeof(*runs));
+    if (runs == NULL) {
+        free(name_copy);
+        goto memory_error;
+    }
+    config->benchmarks = runs;
+    config->benchmarks[config->benchmark_count++] = (BenchmarkRun){
+        .benchmark = benchmark,
+        .name = name_copy,
+        .options = *options,
+    };
+    return true;
+
+memory_error:
+    snprintf(error, error_size, "out of memory while loading benchmark runs");
+    return false;
+}
+
+/* Read one Typometer configuration without inheriting another variant's values. */
+static bool read_typometer_options(toml_datum_t table, RunOptions *options,
+                                   char *error, size_t error_size) {
+    static const char *const keys[] = {
+        "count", "delay_ms", "asynchronous", "pause_every", "pause_ms",
+    };
+    if (table.type != TOML_TABLE) {
+        snprintf(error, error_size, "each typometer configuration must be a table");
+        return false;
+    }
+    for (int i = 0; i < table.u.tab.size; ++i) {
+        const char *key = table.u.tab.key[i];
+        bool known = false;
+        for (size_t j = 0; j < sizeof(keys) / sizeof(*keys); ++j) {
+            if ((size_t)table.u.tab.len[i] == strlen(keys[j]) &&
+                strcmp(key, keys[j]) == 0) known = true;
+        }
+        if (!known) {
+            snprintf(error, error_size, "unknown typometer option '%s'", key);
+            return false;
+        }
+    }
+    toml_datum_t asynchronous = toml_get(table, "asynchronous");
+    if (asynchronous.type != TOML_UNKNOWN && asynchronous.type != TOML_BOOLEAN) {
+        snprintf(error, error_size, "asynchronous must be a boolean");
+        return false;
+    }
+    unsigned long long count = options->typometer_count;
+    unsigned long long delay = options->typometer_delay_ms;
+    unsigned long long pause_every = options->typometer_pause_every;
+    unsigned long long pause = options->typometer_pause_ms;
+    if (!read_option(table, "count", UINT_MAX, &count, error, error_size) ||
+        !read_option(table, "delay_ms", UINT_MAX, &delay, error, error_size) ||
+        !read_option(table, "pause_every", UINT_MAX, &pause_every, error, error_size) ||
+        !read_option(table, "pause_ms", UINT_MAX, &pause, error, error_size)) {
+        return false;
+    }
+    if (count == 0) {
+        snprintf(error, error_size, "count must be positive");
+        return false;
+    }
+    options->typometer_count = (unsigned)count;
+    options->typometer_delay_ms = (unsigned)delay;
+    options->typometer_pause_every = (unsigned)pause_every;
+    options->typometer_pause_ms = (unsigned)pause;
+    options->typometer_asynchronous =
+        asynchronous.type == TOML_BOOLEAN && asynchronous.u.boolean;
+    return true;
+}
+
+/* Expand Typometer variants in TOML order at their normal place in the suite. */
+static bool read_benchmarks(toml_datum_t root, AppConfig *config,
+                            char *error, size_t error_size) {
+    static const char *const legacy_keys[] = {
+        "typometer_count", "typometer_delay_ms", "typometer_asynchronous",
+        "typometer_pause_every", "typometer_pause_ms",
+    };
+    for (size_t i = 0; i < sizeof(legacy_keys) / sizeof(*legacy_keys); ++i) {
+        if (toml_get(root, legacy_keys[i]).type != TOML_UNKNOWN) {
+            snprintf(error, error_size,
+                     "root typometer_* options have moved to [typometer.NAME]; use count, delay_ms, asynchronous, pause_every, and pause_ms");
+            return false;
+        }
+    }
+    toml_datum_t variants = toml_get(root, "typometer");
+    if (variants.type != TOML_UNKNOWN &&
+        (variants.type != TOML_TABLE || variants.u.tab.size == 0)) {
+        snprintf(error, error_size,
+                 "typometer must be a nonempty table of named configurations such as [typometer.basic]");
+        return false;
+    }
+    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
+        const Benchmark *benchmark = &te_stsuite_benchmarks[i];
+        if (!benchmark_is_typometer(benchmark->name) ||
+            variants.type == TOML_UNKNOWN) {
+            if (!append_benchmark(config, benchmark, benchmark->name,
+                                   &config->options, error, error_size)) return false;
+            continue;
+        }
+        for (int j = 0; j < variants.u.tab.size; ++j) {
+            const char *key = variants.u.tab.key[j];
+            int length = variants.u.tab.len[j];
+            char name[128];
+            /* Worker events carry one whitespace-free name of at most 127 bytes. */
+            bool valid_name = length > 0 &&
+                (size_t)length + sizeof("typometer/") - 1 < sizeof(name);
+            for (int k = 0; k < length && valid_name; ++k) {
+                unsigned char byte = (unsigned char)key[k];
+                if (byte <= ' ' || byte == 127 || byte == '/') valid_name = false;
+            }
+            if (!valid_name) {
+                snprintf(error, error_size,
+                         "typometer config names must be nonempty, at most 117 bytes, and contain no spaces, control characters, or slashes");
+                return false;
+            }
+            snprintf(name, sizeof(name), "typometer/%s", key);
+            RunOptions options = config->options;
+            char detail[256];
+            if (!read_typometer_options(variants.u.tab.value[j], &options,
+                                         detail, sizeof(detail))) {
+                snprintf(error, error_size, "%s: %s", name, detail);
+                return false;
+            }
+            if (!append_benchmark(config, benchmark, name, &options,
+                                   error, error_size)) return false;
+        }
+    }
+    return true;
+}
+
+/* Parse runtime options, named Typometer runs, and terminals in source order. */
 bool config_load(const char *path, AppConfig *config, char *error,
                  size_t error_size) {
     memset(config, 0, sizeof(*config));
@@ -306,19 +445,6 @@ bool config_load(const char *path, AppConfig *config, char *error,
     unsigned long long startup_min_samples =
         config->options.startup_min_samples;
     unsigned long long startup_timeout = config->options.startup_timeout_seconds;
-    unsigned long long typometer_count = config->options.typometer_count;
-    unsigned long long typometer_delay = config->options.typometer_delay_ms;
-    unsigned long long typometer_pause_every = config->options.typometer_pause_every;
-    unsigned long long typometer_pause = config->options.typometer_pause_ms;
-    toml_datum_t asynchronous = toml_get(result.toptab, "typometer_asynchronous");
-    if (asynchronous.type != TOML_UNKNOWN && asynchronous.type != TOML_BOOLEAN) {
-        snprintf(error, error_size, "typometer_asynchronous must be a boolean");
-        toml_free(result);
-        config_free(config);
-        return false;
-    }
-    config->options.typometer_asynchronous =
-        asynchronous.type == TOML_BOOLEAN && asynchronous.u.boolean;
     toml_datum_t monitor_name = toml_get(result.toptab, "monitor");
     if (monitor_name.type != TOML_UNKNOWN) {
         char *name = copy_toml_string(monitor_name);
@@ -360,24 +486,12 @@ bool config_load(const char *path, AppConfig *config, char *error,
                  read_option(result.toptab, "startup_min_samples", UINT_MAX,
                              &startup_min_samples, error, error_size) &&
                  read_option(result.toptab, "startup_timeout_seconds", UINT_MAX,
-                             &startup_timeout, error, error_size) &&
-                 read_option(result.toptab, "typometer_count", UINT_MAX,
-                             &typometer_count, error, error_size) &&
-                 read_option(result.toptab, "typometer_delay_ms", UINT_MAX,
-                             &typometer_delay, error, error_size) &&
-                 read_option(result.toptab, "typometer_pause_every", UINT_MAX,
-                             &typometer_pause_every, error, error_size) &&
-                 read_option(result.toptab, "typometer_pause_ms", UINT_MAX,
-                             &typometer_pause, error, error_size);
+                             &startup_timeout, error, error_size);
     if (valid && (min_bytes == 0 || max_seconds == 0 ||
                   startup_min_seconds == 0 || startup_min_samples == 0 ||
                   startup_timeout == 0)) {
         snprintf(error, error_size,
                  "min_bytes, max_seconds, startup_min_seconds, startup_min_samples, and startup_timeout_seconds must be positive");
-        valid = false;
-    }
-    if (valid && typometer_count == 0) {
-        snprintf(error, error_size, "typometer_count must be positive");
         valid = false;
     }
     if (!valid) {
@@ -392,15 +506,17 @@ bool config_load(const char *path, AppConfig *config, char *error,
     config->options.startup_min_seconds = (unsigned)startup_min_seconds;
     config->options.startup_min_samples = (unsigned)startup_min_samples;
     config->options.startup_timeout_seconds = (unsigned)startup_timeout;
-    config->options.typometer_count = (unsigned)typometer_count;
-    config->options.typometer_delay_ms = (unsigned)typometer_delay;
-    config->options.typometer_pause_every = (unsigned)typometer_pause_every;
-    config->options.typometer_pause_ms = (unsigned)typometer_pause;
+    if (!read_benchmarks(result.toptab, config, error, error_size)) {
+        toml_free(result);
+        config_free(config);
+        return false;
+    }
 
     bool parsed_terminals = false;
     for (int i = 0; i < result.toptab.u.tab.size; ++i) {
         const char *key = result.toptab.u.tab.key[i];
         toml_datum_t value = result.toptab.u.tab.value[i];
+        if (strcmp(key, "typometer") == 0) continue;
         if (value.type != TOML_TABLE) {
             continue;
         }

@@ -98,7 +98,10 @@ file. Bare `-t` prints help without a config; pass a config to also list its
 configured terminals. Add a name to either option to select it for the run;
 repeat named selectors to select more. Terminal names match the named TOML
 tables; selecting a terminal with config variants runs every variant, while a
-full name such as `kitty/compact` selects just that variant.
+full name such as `kitty/compact` selects just that variant. The benchmark name
+`typometer` selects every named Typometer configuration; `typometer/basic`
+selects only `basic`. Passing a config to bare `-b` also lists its Typometer
+configuration names.
 
 ```sh
 ./build/te-stsuite -b
@@ -258,10 +261,44 @@ This includes input dispatch, the worker's echo, PTY transport, and visible
 rendering through X11. It excludes physical keyboard hardware and monitor
 scanout. Calibration uses screen reads internally; it saves no images.
 
-Root TOML options are `typometer_count` (default 100), `typometer_delay_ms`
-(default 0), `typometer_asynchronous` (default false), `typometer_pause_every`
-(default 0, disabled), and `typometer_pause_ms` (default 1000). Periodic pauses
-replace the ordinary delay. Synchronous mode waits for each screen change
+Define any number of Typometer configurations in named TOML tables:
+
+```toml
+[typometer.basic]
+count = 100
+delay_ms = 0
+asynchronous = false
+pause_every = 0
+pause_ms = 1000
+
+[typometer.paced]
+count = 100
+delay_ms = 10
+asynchronous = true
+pause_every = 20
+pause_ms = 1000
+```
+
+Each table independently defaults to `count = 100`, `delay_ms = 0`,
+`asynchronous = false`, `pause_every = 0` (disabled), and `pause_ms = 1000`.
+`count` must be positive; timing and pause values must be nonnegative integers,
+and `asynchronous` must be a boolean. Names must be nonempty, at most 117 bytes,
+and contain no spaces, control characters, or slashes. The root `typometer_*`
+options have been replaced by these table entries. When no Typometer tables
+are defined, the suite runs one `typometer` workload with the defaults.
+
+`-b typometer` and runs without a benchmark selector execute every configuration
+in file order, warming and reporting each separately as `typometer/basic`,
+`typometer/paced`, and so on. Selecting both the group and an individual
+configuration runs each matching configuration once:
+
+```sh
+./build/te-stsuite example.toml -b typometer
+./build/te-stsuite example.toml -b typometer/basic
+./build/te-stsuite example.toml -b
+```
+
+Periodic pauses replace the ordinary delay. Synchronous mode waits for each screen change
 before applying the delay; asynchronous mode uses a separate input thread
 that can queue characters ahead of rendering. Both modes delete completed
 batches with Backspace. `max_samples` can cap the character count, and
@@ -270,7 +307,8 @@ three further seconds before timing out; batch cleanup also needs time to
 settle. Each warmup pass runs the same workload without recording results.
 
 Reports include mean, 90th percentile, and sample standard deviation of typing
-latency. JSONL results use `latency_avg_ms`, `latency_p90_ms`, and
+latency for each configuration. JSONL results identify it in `benchmark` and
+use `latency_avg_ms`, `latency_p90_ms`, and
 `latency_sd_ms`, with `samples` counting characters and `payload_bytes` zero.
 CPU and memory use the selected te-stsuite monitoring backend. Their interval
 excludes calibration and includes typing, delays, pauses, and cleanup. Focus

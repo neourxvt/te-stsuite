@@ -255,29 +255,31 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
     }
 
     BenchContext context = {.rows = size.ws_row, .columns = size.ws_col};
-    for (size_t index = 1; index < te_stsuite_benchmark_count; ++index) {
-        const Benchmark *benchmark = &te_stsuite_benchmarks[index];
-        if (!selection_includes_benchmark(selection, benchmark->name)) {
+    for (size_t index = 1; index < config->benchmark_count; ++index) {
+        const BenchmarkRun *run = &config->benchmarks[index];
+        const Benchmark *benchmark = run->benchmark;
+        const RunOptions *options = &run->options;
+        if (!selection_includes_benchmark(selection, run->name)) {
             continue;
         }
         if (benchmark->execute != NULL) {
             bool warmup = selection != NULL &&
                           selection->phase == WORKER_PHASE_WARMUP;
-            unsigned passes = warmup ? config->options.warmup : 1;
+            unsigned passes = warmup ? options->warmup : 1;
             bool ok = true;
             for (unsigned pass = 0; pass < passes && ok; ++pass) {
                 BenchSamples samples = {0};
-                ActiveBenchmark active = {control_fd, benchmark->name};
+                ActiveBenchmark active = {control_fd, run->name};
                 char error[256] = {0};
-                ok = benchmark->execute(&context, &config->options, warmup,
+                ok = benchmark->execute(&context, options, warmup,
                                          begin_active_benchmark, &active,
                                          &samples, error, sizeof(error));
                 if (ok && !warmup) {
-                    ok = report_samples(control_fd, benchmark->name,
+                    ok = report_samples(control_fd, run->name,
                                          samples.values, samples.count);
                 }
                 free(samples.values);
-                if (!ok) send_event(control_fd, "F %s: %s\n", benchmark->name,
+                if (!ok) send_event(control_fd, "F %s: %s\n", run->name,
                                     error[0] ? error : "active benchmark failed");
             }
             if (!ok) {
@@ -288,9 +290,9 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         }
         BenchData data;
         char error[256] = {0};
-        if (!prepare_benchmark(benchmark, &context, &config->options, &data,
+        if (!prepare_benchmark(benchmark, &context, options, &data,
                                error, sizeof(error))) {
-            send_event(control_fd, "F %s: %s\n", benchmark->name,
+            send_event(control_fd, "F %s: %s\n", run->name,
                        error[0] == '\0' ? "unable to prepare benchmark" : error);
             buffer_free(&data.setup);
             buffer_free(&data.payload);
@@ -300,7 +302,7 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
 
         if (selection != NULL && selection->phase == WORKER_PHASE_WARMUP) {
             bool warmed = true;
-            for (unsigned warmup = 0; warmup < config->options.warmup; ++warmup) {
+            for (unsigned warmup = 0; warmup < options->warmup; ++warmup) {
                 if (!run_sample(&data, NULL)) {
                     warmed = false;
                     break;
@@ -313,14 +315,14 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
             buffer_free(&data.payload);
             if (!warmed) {
                 send_event(control_fd, "F %s: PTY write failed during warmup\n",
-                           benchmark->name);
+                           run->name);
                 close(control_fd);
                 return 1;
             }
             continue;
         }
 
-        if (!send_event(control_fd, "S %s %zu\n", benchmark->name,
+        if (!send_event(control_fd, "S %s %zu\n", run->name,
                         data.payload.length)) {
             buffer_free(&data.setup);
             buffer_free(&data.payload);
@@ -330,13 +332,13 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
 
         bool ok = true;
         uint64_t deadline = monotonic_now_ns() +
-                            (uint64_t)config->options.max_seconds * 1000000000ULL;
+                            (uint64_t)options->max_seconds * 1000000000ULL;
         unsigned samples = 0;
         size_t duration_capacity = 0;
         uint64_t *durations = NULL;
         const char *failure = "PTY write failed";
-        while (ok && (config->options.max_samples == 0 ||
-                      samples < config->options.max_samples) &&
+        while (ok && (options->max_samples == 0 ||
+                      samples < options->max_samples) &&
                monotonic_now_ns() < deadline) {
             if (samples == duration_capacity) {
                 size_t next_capacity = duration_capacity == 0
@@ -361,9 +363,9 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         static const char reset[] = "\033c";
         if (ok) ok = write_all(STDOUT_FILENO, reset, sizeof(reset) - 1);
         if (ok) {
-            ok = report_samples(control_fd, benchmark->name, durations, samples);
+            ok = report_samples(control_fd, run->name, durations, samples);
         } else {
-            send_event(control_fd, "F %s: %s\n", benchmark->name, failure);
+            send_event(control_fd, "F %s: %s\n", run->name, failure);
         }
         free(durations);
         buffer_free(&data.setup);

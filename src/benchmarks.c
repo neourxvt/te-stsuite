@@ -1,5 +1,13 @@
 #include "te-stsuite.h"
 
+#include <string.h>
+
+/* Keep selection and latency reporting consistent for named Typometer runs. */
+bool benchmark_is_typometer(const char *name) {
+    return strcmp(name, "typometer") == 0 ||
+           strncmp(name, "typometer/", sizeof("typometer/") - 1) == 0;
+}
+
 int bench_startup_prepare(BenchData *, const BenchContext *, char *, size_t);
 int bench_cursor_motion_prepare(BenchData *, const BenchContext *, char *, size_t);
 int bench_dense_cells_prepare(BenchData *, const BenchContext *, char *, size_t);

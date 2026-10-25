@@ -68,6 +68,13 @@ typedef struct {
     BenchExecute execute;
 } Benchmark;
 
+/* One configured run, with a distinct name and independent runtime settings. */
+typedef struct {
+    const Benchmark *benchmark;
+    char *name;
+    RunOptions options;
+} BenchmarkRun;
+
 /* One environment override applied only to the launched terminal. */
 typedef struct {
     char *name;
@@ -95,6 +102,8 @@ typedef struct {
     ProcessIsolationMode process_isolation;
     TerminalConfig *terminals;
     size_t terminal_count;
+    BenchmarkRun *benchmarks;
+    size_t benchmark_count;
 } AppConfig;
 
 /* The worker phase is passed privately by the controller to each terminal. */
@@ -117,6 +126,9 @@ typedef struct {
 
 extern const Benchmark te_stsuite_benchmarks[];
 extern const size_t te_stsuite_benchmark_count;
+
+/* Recognize the default Typometer run and its named configuration results. */
+bool benchmark_is_typometer(const char *name);
 
 /* Benchmark payloads generated from the source fixtures during the build. */
 extern const unsigned char te_stsuite_unicode_symbols[];

@@ -17,14 +17,15 @@ monitor = "cgroupv2"
 # CPU placement: "cgroupv2" or "taskset".
 process_isolation = "taskset"
 
+[typometer.basic]
 # Typometer measures up to this many injected period characters per run.
-typometer_count = 100
+count = 100
 # Wait after each character, or type independently of rendering when true.
-typometer_delay_ms = 0
-typometer_asynchronous = false
+delay_ms = 0
+asynchronous = false
 # Replace the normal delay every N characters; 0 disables periodic pauses.
-typometer_pause_every = 0
-typometer_pause_ms = 1000
+pause_every = 0
+pause_ms = 1000
 
 # Each named table configures a terminal. Its cmd must include {CMD} as a
 # standalone word; pass inline configs through {CFG} or an env reference below.

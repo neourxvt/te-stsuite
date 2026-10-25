@@ -13,14 +13,20 @@ typedef struct {
     size_t capacity;
 } SelectorList;
 
-/* Print the registered benchmarks in a stable order for discovery. */
-static void print_benchmark_names(void) {
-    const char *benchmark_names[te_stsuite_benchmark_count];
-    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
-        benchmark_names[i] = te_stsuite_benchmarks[i].name;
+/* Show configured Typometer variants alongside their selectable group name. */
+static void print_benchmark_names(const AppConfig *config) {
+    size_t count = config == NULL ? te_stsuite_benchmark_count : config->benchmark_count;
+    const char *benchmark_names[count + 1];
+    bool has_variants = false;
+    for (size_t i = 0; i < count; ++i) {
+        benchmark_names[i] = config == NULL ? te_stsuite_benchmarks[i].name
+                                            : config->benchmarks[i].name;
+        if (benchmark_is_typometer(benchmark_names[i]) &&
+            strcmp(benchmark_names[i], "typometer") != 0) has_variants = true;
     }
+    if (has_variants) benchmark_names[count++] = "typometer";
     /* Keep the listing alphabetical without changing workload execution order. */
-    for (size_t i = 1; i < te_stsuite_benchmark_count; ++i) {
+    for (size_t i = 1; i < count; ++i) {
         const char *name = benchmark_names[i];
         size_t j = i;
         while (j > 0 && strcmp(benchmark_names[j - 1], name) > 0) {
@@ -29,7 +35,7 @@ static void print_benchmark_names(void) {
         }
         benchmark_names[j] = name;
     }
-    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
+    for (size_t i = 0; i < count; ++i) {
         printf("  %s\n", benchmark_names[i]);
     }
 }
@@ -42,7 +48,7 @@ static void print_terminal_names(const AppConfig *config) {
 }
 
 /* Show the run modes, selectors, workload names, and measurement flow. */
-static void print_usage(const char *program) {
+static void print_usage(const char *program, const AppConfig *config) {
     printf("Usage: %s [CONFIG.toml] [OPTIONS]\n\n", program);
     printf("Runs terminal emulator benchmarks on modern Linux from named TOML entries.\n");
     printf("It checks process placement, then warms and benchmarks each selected\n");
@@ -62,8 +68,9 @@ static void print_usage(const char *program) {
     printf("Use polling with taskset to run without cgroups.\n");
     printf("Process placement checks run before warmup and measurement.\n\n");
     printf("A terminal name selects all its config variants; a name such as\n");
-    printf("kitty/compact selects one variant. Available benchmarks:\n");
-    print_benchmark_names();
+    printf("kitty/compact selects one variant. The benchmark name typometer runs\n");
+    printf("all its configurations; typometer/basic selects one. Available benchmarks:\n");
+    print_benchmark_names(config);
     printf("With no selectors, all configured terminals and workloads run.\n");
 }
 
@@ -193,7 +200,7 @@ int main(int argc, char **argv) {
     }
 
     if (!arguments_valid) {
-        print_usage(argv[0]);
+        print_usage(argv[0], NULL);
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
@@ -206,21 +213,21 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (help) {
-        print_usage(argv[0]);
+        print_usage(argv[0], NULL);
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 0;
     }
     /* Benchmark discovery and general help do not need a terminal config. */
-    if (list_benchmarks && !list_terminals) {
-        print_usage(argv[0]);
+    if (list_benchmarks && !list_terminals && config_path == NULL) {
+        print_usage(argv[0], NULL);
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 0;
     }
     /* A config is needed only to enumerate configured terminal names. */
     if (list_terminals && config_path == NULL) {
-        print_usage(argv[0]);
+        print_usage(argv[0], NULL);
         printf("Terminal names are defined by the TOML config; pass one to\n");
         printf("list them.\n");
         selector_list_free(&terminals);
@@ -229,7 +236,7 @@ int main(int argc, char **argv) {
     }
     if (config_path == NULL) {
         fprintf(stderr, "te-stsuite: an input TOML configuration is required\n");
-        print_usage(argv[0]);
+        print_usage(argv[0], NULL);
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
@@ -275,7 +282,7 @@ int main(int argc, char **argv) {
     }
     /* Listing selectors print their catalogs and exit before any terminal runs. */
     if (list_terminals || list_benchmarks) {
-        print_usage(argv[0]);
+        print_usage(argv[0], &config);
         if (list_terminals) {
             printf("Configured terminals:\n");
             print_terminal_names(&config);

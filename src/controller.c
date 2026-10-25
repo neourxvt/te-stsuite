@@ -115,6 +115,13 @@ static bool terminal_is_selected(const TerminalConfig *terminal,
     return false;
 }
 
+/* The Typometer group selects every configuration; full names select one run. */
+static bool benchmark_name_matches(const char *configured, const char *requested) {
+    return strcmp(configured, requested) == 0 ||
+           (strcmp(requested, "typometer") == 0 &&
+            benchmark_is_typometer(configured));
+}
+
 /* Check a supplied selector set before opening a log or launching terminals. */
 bool selection_validate(const AppConfig *config, const RunSelection *selection,
                         char *error, size_t error_size) {
@@ -136,9 +143,9 @@ bool selection_validate(const AppConfig *config, const RunSelection *selection,
     }
     for (size_t i = 0; i < selection->benchmark_count; ++i) {
         bool found = false;
-        for (size_t j = 0; j < te_stsuite_benchmark_count; ++j) {
-            if (strcmp(te_stsuite_benchmarks[j].name,
-                       selection->benchmark_names[i]) == 0) {
+        for (size_t j = 0; j < config->benchmark_count; ++j) {
+            if (benchmark_name_matches(config->benchmarks[j].name,
+                                        selection->benchmark_names[i])) {
                 found = true;
                 break;
             }
@@ -157,17 +164,18 @@ bool selection_includes_benchmark(const RunSelection *selection,
                                   const char *name) {
     if (selection == NULL || selection->benchmark_count == 0) return true;
     for (size_t i = 0; i < selection->benchmark_count; ++i) {
-        if (strcmp(selection->benchmark_names[i], name) == 0) return true;
+        if (benchmark_name_matches(name, selection->benchmark_names[i])) return true;
     }
     return false;
 }
 
 /* Count selected workloads so warmup is skipped when no measurement will run. */
-static size_t selected_benchmark_count(const RunSelection *selection) {
+static size_t selected_benchmark_count(const AppConfig *config,
+                                       const RunSelection *selection) {
     size_t count = 0;
-    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
+    for (size_t i = 0; i < config->benchmark_count; ++i) {
         if (selection_includes_benchmark(selection,
-                                         te_stsuite_benchmarks[i].name)) {
+                                         config->benchmarks[i].name)) {
             count++;
         }
     }
@@ -738,7 +746,7 @@ static void print_summary(const Summary *summary) {
                       summary->sample_mean_ms, summary->sample_p90_ms,
                       summary->sample_stddev_ms);
     }
-    if (strcmp(summary->benchmark, "typometer") == 0 && summary->samples > 0) {
+    if (benchmark_is_typometer(summary->benchmark) && summary->samples > 0) {
         report_styled(color_dim,
                       "    Latency    avg %9.2f ms   p90 %9.2f ms   sd %9.2f ms\n",
                       summary->sample_mean_ms, summary->sample_p90_ms,
@@ -918,7 +926,7 @@ static void print_collective_summary(const SummaryList *summaries) {
     bool has_latency_results = false;
     for (size_t i = 0; i < summaries->count; ++i) {
         if (summaries->items[i].bytes > 0) has_write_results = true;
-        if (strcmp(summaries->items[i].benchmark, "typometer") == 0 &&
+        if (benchmark_is_typometer(summaries->items[i].benchmark) &&
             summaries->items[i].samples > 0) has_latency_results = true;
         if (strcmp(summaries->items[i].benchmark, "startup") == 0) {
             has_startup_results = true;
@@ -980,7 +988,7 @@ static void print_collective_summary(const SummaryList *summaries) {
         print_table_rule(terminal_width + benchmark_width + 2 * 6 + 3 * 12 + 9);
         for (size_t i = 0; i < summaries->count; ++i) {
             const Summary *summary = &summaries->items[i];
-            if (strcmp(summary->benchmark, "typometer") != 0 || summary->samples == 0) continue;
+            if (!benchmark_is_typometer(summary->benchmark) || summary->samples == 0) continue;
             report("%-*s  %-*s", (int)terminal_width, summary->terminal,
                    (int)benchmark_width, summary->benchmark);
             print_summary_timings(summaries, summary);
@@ -1128,11 +1136,11 @@ static void jsonl_write_result(const Summary *summary) {
                                      summary->sample_stddev_ms);
     }
     /* Failed runs have no latency samples; zero would look like a measurement. */
-    if (ok && strcmp(summary->benchmark, "typometer") == 0 && !summary->samples) {
+    if (ok && benchmark_is_typometer(summary->benchmark) && !summary->samples) {
         ok = yyjson_mut_obj_add_null(doc, object, "latency_avg_ms") &&
              yyjson_mut_obj_add_null(doc, object, "latency_p90_ms") &&
              yyjson_mut_obj_add_null(doc, object, "latency_sd_ms");
-    } else if (ok && strcmp(summary->benchmark, "typometer") == 0) {
+    } else if (ok && benchmark_is_typometer(summary->benchmark)) {
         ok = yyjson_mut_obj_add_real(doc, object, "latency_avg_ms",
                                      summary->sample_mean_ms) &&
              yyjson_mut_obj_add_real(doc, object, "latency_p90_ms",
@@ -1835,11 +1843,11 @@ static bool run_terminal(const TerminalConfig *terminal,
     uint64_t seconds_limit = UINT64_MAX / 1000000000ULL;
     uint64_t worker_allowance;
     if (seconds_per_benchmark >
-        (seconds_limit - 10) / te_stsuite_benchmark_count) {
+        (seconds_limit - 10) / config->benchmark_count) {
         worker_allowance = UINT64_MAX;
     } else {
         worker_allowance = seconds_per_benchmark *
-                           te_stsuite_benchmark_count * 1000000000ULL +
+                           config->benchmark_count * 1000000000ULL +
                            10000000000ULL;
     }
     uint64_t worker_deadline = deadline > UINT64_MAX - worker_allowance
@@ -2233,7 +2241,7 @@ static int run_controller(const AppConfig *config, const RunSelection *selection
     }
 
     bool all_ok = true;
-    size_t benchmark_count = selected_benchmark_count(selection);
+    size_t benchmark_count = selected_benchmark_count(config, selection);
     bool startup_selected = selection_includes_benchmark(selection, "startup");
     size_t workload_count = benchmark_count - (startup_selected ? 1 : 0);
     if (benchmark_count == 0) {
