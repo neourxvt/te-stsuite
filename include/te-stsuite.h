@@ -68,12 +68,20 @@ typedef struct {
     BenchExecute execute;
 } Benchmark;
 
+/* One environment override applied only to the launched terminal. */
+typedef struct {
+    char *name;
+    char *value;
+} TerminalEnv;
+
 /* One configured terminal command from the TOML file. */
 typedef struct {
     char *name;
     char *command;
     char *inline_config;
     size_t inline_config_length;
+    TerminalEnv *env;
+    size_t env_count;
     /* NULL leaves XENVIRONMENT unchanged; an empty string creates an empty file. */
     char *xresources;
     size_t xresources_length;

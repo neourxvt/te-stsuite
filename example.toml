@@ -27,7 +27,7 @@ typometer_pause_every = 0
 typometer_pause_ms = 1000
 
 # Each named table configures a terminal. Its cmd must include {CMD} as a
-# standalone word; use {CFG} once when defining inline config variants below.
+# standalone word; pass inline configs through {CFG} or an env reference below.
 # Use a minimal monospace font configuration at size 11 for each terminal.
 # Kitty also offers a profile with latency settings for comparison.
 [alacritty]
@@ -93,18 +93,11 @@ font-size = 11
 """
 
 [rio]
-# Rio loads config.toml from RIO_CONFIG_HOME rather than taking a file argument.
-# The wrapper's directory setup is included in startup measurements.
-cmd = '''
-sh -c '
-    rio_config_dir=$(mktemp -d /tmp/te-stsuite-rio-XXXXXX) || exit 1
-    trap "rm -rf -- \"$rio_config_dir\"" 0
-    trap "exit 1" HUP INT TERM
-    ln -s "$1" "$rio_config_dir/config.toml" || exit 1
-    shift
-    RIO_CONFIG_HOME="$rio_config_dir" rio -e "$@"
-' sh {CFG} {CMD}
-'''
+cmd = "rio -e {CMD}"
+
+# Rio reads config.toml from the temporary config directory.
+[rio.env]
+RIO_CONFIG_HOME = "{CFG_DIR}"
 
 [rio.configs]
 standard = """

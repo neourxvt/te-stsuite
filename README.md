@@ -113,9 +113,17 @@ expanded to the current executable, the TOML path, `--run`, and a private local
 worker control pipe option. A terminal can define multiple inline configuration
 variants under `[kitty.configs]`, with each key naming a variant and its
 multiline string supplying the content. Each variant is run separately; its
-content is written to a temporary file and the standalone `{CFG}` command word
-is replaced with that file's path. Commands without inline variants must not
-contain `{CFG}`. The worker runs inside the terminal's PTY. A terminal can
+content is written to `config.toml` in a private temporary directory and the
+standalone `{CFG}` command word is replaced with that file's path. A terminal
+can instead pass the path through its `env` table. Values equal to `{CFG}` or
+`{CFG_DIR}` receive the config file or directory path; other strings are passed
+literally. For example, Rio can use `cmd = "rio -e {CMD}"` with
+`RIO_CONFIG_HOME = "{CFG_DIR}"` under `[rio.env]`. Config references require
+inline variants, and each variant must reference its config through the command
+or environment. Environment overrides apply only to that terminal launch and
+are inherited by all its variants. The temporary file and directory are removed
+when the launch ends. Commands without inline variants must not contain `{CFG}`.
+The worker runs inside the terminal's PTY. A terminal can
 define a nested `xresources` table, for example `[xterm.xresources]`, with each
 key naming an X resource and each single-line string, integer, float, or
 boolean supplying its value. The table is serialized to a temporary file for

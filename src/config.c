@@ -135,17 +135,70 @@ void config_free(AppConfig *config) {
         free(config->terminals[i].name);
         free(config->terminals[i].command);
         free(config->terminals[i].inline_config);
+        for (size_t j = 0; j < config->terminals[i].env_count; ++j) {
+            free(config->terminals[i].env[j].name);
+            free(config->terminals[i].env[j].value);
+        }
+        free(config->terminals[i].env);
         free(config->terminals[i].xresources);
     }
     free(config->terminals);
     memset(config, 0, sizeof(*config));
 }
 
+/* Preserve literal environment values and validate optional config references. */
+static bool read_terminal_env(toml_datum_t table, TerminalConfig *terminal,
+                               char *error, size_t error_size) {
+    if (table.type == TOML_UNKNOWN) return true;
+    if (table.type != TOML_TABLE) {
+        snprintf(error, error_size, "terminal '%s' env must be a table",
+                 terminal->name);
+        return false;
+    }
+    terminal->env = calloc((size_t)table.u.tab.size, sizeof(*terminal->env));
+    if (table.u.tab.size > 0 && terminal->env == NULL) {
+        snprintf(error, error_size, "out of memory while loading terminal env");
+        return false;
+    }
+    for (int i = 0; i < table.u.tab.size; ++i) {
+        const char *name = table.u.tab.key[i];
+        int length = table.u.tab.len[i];
+        toml_datum_t value = table.u.tab.value[i];
+        if (length <= 0 || memchr(name, '=', (size_t)length) != NULL ||
+            memchr(name, '\0', (size_t)length) != NULL ||
+            value.type != TOML_STRING || value.u.str.len < 0 ||
+            memchr(value.u.str.ptr, '\0', (size_t)value.u.str.len) != NULL) {
+            snprintf(error, error_size,
+                     "terminal '%s' env needs nonempty names without '=' and string values without NUL bytes",
+                     terminal->name);
+            return false;
+        }
+        const char *text = value.u.str.ptr;
+        bool config_ref = strstr(text, "{CFG}") != NULL ||
+                          strstr(text, "{CFG_DIR}") != NULL;
+        if (config_ref && (terminal->inline_config == NULL ||
+            (strcmp(text, "{CFG}") != 0 && strcmp(text, "{CFG_DIR}") != 0))) {
+            snprintf(error, error_size,
+                     "terminal '%s' env config references must be exactly {CFG} or {CFG_DIR} and require configs",
+                     terminal->name);
+            return false;
+        }
+        TerminalEnv *entry = &terminal->env[terminal->env_count++];
+        entry->name = strndup(name, (size_t)length);
+        entry->value = copy_toml_string(value);
+        if (entry->name == NULL || entry->value == NULL) {
+            snprintf(error, error_size, "out of memory while loading terminal env");
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Append one named terminal run, optionally paired with an inline config. */
 static bool append_terminal(AppConfig *config, const char *name,
                             toml_datum_t command, const char *variant_name,
                             toml_datum_t variant_content, bool has_variant,
-                            toml_datum_t xresources,
+                            toml_datum_t xresources, toml_datum_t env,
                             char *error, size_t error_size) {
     char *command_copy = copy_toml_string(command);
     char *name_copy = NULL;
@@ -208,7 +261,8 @@ static bool append_terminal(AppConfig *config, const char *name,
         .xresources = xresources_copy,
         .xresources_length = xresources_length,
     };
-    return true;
+    return read_terminal_env(env, &config->terminals[config->terminal_count - 1],
+                             error, error_size);
 }
 
 /* Parse root runtime options and each named terminal table in source order. */
@@ -354,6 +408,7 @@ bool config_load(const char *path, AppConfig *config, char *error,
         toml_datum_t command = toml_get(value, "cmd");
         toml_datum_t variants = toml_get(value, "configs");
         toml_datum_t xresources = toml_get(value, "xresources");
+        toml_datum_t env = toml_get(value, "env");
         if (xresources.type != TOML_UNKNOWN &&
             xresources.type != TOML_TABLE) {
             snprintf(error, error_size,
@@ -364,7 +419,7 @@ bool config_load(const char *path, AppConfig *config, char *error,
         }
         if (variants.type == TOML_UNKNOWN) {
             if (!append_terminal(config, key, command, NULL,
-                                 (toml_datum_t){0}, false, xresources, error,
+                                 (toml_datum_t){0}, false, xresources, env, error,
                                  error_size)) {
                 toml_free(result);
                 config_free(config);
@@ -385,7 +440,7 @@ bool config_load(const char *path, AppConfig *config, char *error,
             if (!append_terminal(config, key, command,
                                  variants.u.tab.key[variant_index],
                                  variants.u.tab.value[variant_index], true,
-                                 xresources, error, error_size)) {
+                                 xresources, env, error, error_size)) {
                 toml_free(result);
                 config_free(config);
                 return false;
