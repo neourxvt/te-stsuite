@@ -1,11 +1,11 @@
 #define _GNU_SOURCE
 #include "te-stsuite.h"
 #include "yyjson.h"
+#include "process_isolation.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -1075,10 +1075,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (child == 0) {
         close(gate[1]);
         setpgid(0, 0);
-        cpu_set_t cpus;
-        CPU_ZERO(&cpus);
-        CPU_SET(0, &cpus);
-        if (sched_setaffinity(0, sizeof(cpus), &cpus) != 0) {
+        if (!process_isolation_pin_cpu(0)) {
             dprintf(STDERR_FILENO,
                     "te-stsuite: cannot pin terminal to CPU 0: %s\n",
                     strerror(errno));

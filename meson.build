@@ -53,6 +53,7 @@ sources = files(
   'src/monitors/polling.c',
   'src/monitors/cgroupv2.c',
   'src/worker.c',
+  'src/process_isolation.c',
   'src/controller.c',
   'src/benchmarks.c',
   'src/benchmarks/startup.c',
