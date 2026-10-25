@@ -30,12 +30,6 @@ typedef struct {
 typedef int (*BenchPrepare)(BenchData *data, const BenchContext *context,
                             char *error, size_t error_size);
 
-/* A benchmark definition; startup is represented by a zero-payload entry. */
-typedef struct {
-    const char *name;
-    BenchPrepare prepare;
-} Benchmark;
-
 /* Runtime options parsed from TOML and shared with the in-terminal worker. */
 typedef struct {
     size_t min_bytes;
@@ -46,7 +40,33 @@ typedef struct {
     unsigned startup_min_seconds;
     unsigned startup_min_samples;
     unsigned startup_timeout_seconds;
+    /* Typometer counts characters and can queue typing ahead of rendering. */
+    unsigned typometer_count;
+    unsigned typometer_delay_ms;
+    unsigned typometer_pause_every;
+    unsigned typometer_pause_ms;
+    bool typometer_asynchronous;
 } RunOptions;
+
+/* Active benchmarks return individual monotonic durations for shared summaries. */
+typedef struct {
+    uint64_t *values;
+    unsigned count;
+} BenchSamples;
+
+/* Begin resource accounting after calibration and before the actual workload. */
+typedef bool (*BenchBegin)(void *user);
+typedef bool (*BenchExecute)(const BenchContext *context,
+                             const RunOptions *options, bool warmup,
+                             BenchBegin begin, void *user, BenchSamples *samples,
+                             char *error, size_t error_size);
+
+/* Payload benchmarks prepare bytes; active benchmarks execute their own loop. */
+typedef struct {
+    const char *name;
+    BenchPrepare prepare;
+    BenchExecute execute;
+} Benchmark;
 
 /* One configured terminal command from the TOML file. */
 typedef struct {

@@ -48,9 +48,9 @@ static void print_usage(const char *program) {
     printf("It checks process placement, then warms and benchmarks each selected\n");
     printf("terminal on one available isolated CPU. The TOML selects\n");
     printf("cgroup v2 accounting or /proc process-tree polling. Both sample CPU and\n");
-    printf("memory per interval and record PTY write times. Results are printed per\n");
-    printf("benchmark, summarized per terminal and collectively, and saved as\n");
-    printf("timestamped text and JSONL logs in the current directory.\n\n");
+    printf("memory per interval and record startup, PTY write, and typing latency times.\n");
+    printf("Results are printed per benchmark, summarized per terminal and collectively,\n");
+    printf("and saved as timestamped text and JSONL logs in the current directory.\n\n");
     printf("Options:\n");
     printf("  -h, --help               Show this help\n");
     printf("      --version            Show the te-stsuite version\n");

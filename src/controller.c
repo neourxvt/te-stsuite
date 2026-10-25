@@ -695,6 +695,12 @@ static void print_summary(const Summary *summary) {
                       summary->sample_mean_ms, summary->sample_p90_ms,
                       summary->sample_stddev_ms);
     }
+    if (strcmp(summary->benchmark, "typometer") == 0 && summary->samples > 0) {
+        report_styled(color_dim,
+                      "    Latency    avg %9.2f ms   p90 %9.2f ms   sd %9.2f ms\n",
+                      summary->sample_mean_ms, summary->sample_p90_ms,
+                      summary->sample_stddev_ms);
+    }
     if (!summary->complete) {
         report_styled(color_yellow,
                       "    Result is partial because the benchmark did not finish.\n");
@@ -731,8 +737,11 @@ static void print_collective_summary(const SummaryList *summaries) {
     size_t benchmark_width = summary_column_width(summaries, false);
     bool has_write_results = false;
     bool has_startup_results = false;
+    bool has_latency_results = false;
     for (size_t i = 0; i < summaries->count; ++i) {
         if (summaries->items[i].bytes > 0) has_write_results = true;
+        if (strcmp(summaries->items[i].benchmark, "typometer") == 0 &&
+            summaries->items[i].samples > 0) has_latency_results = true;
         if (strcmp(summaries->items[i].benchmark, "startup") == 0) {
             has_startup_results = true;
         }
@@ -789,6 +798,26 @@ static void print_collective_summary(const SummaryList *summaries) {
         for (size_t i = 0; i < summaries->count; ++i) {
             const Summary *summary = &summaries->items[i];
             if (strcmp(summary->benchmark, "startup") != 0) continue;
+            report_styled(summary->complete ? color_green : color_yellow,
+                          "%-*s  %-*s  %12.2f  %12.2f  %12.2f  %9u\n",
+                          (int)terminal_width, summary->terminal,
+                          (int)benchmark_width, summary->benchmark,
+                          summary->sample_mean_ms, summary->sample_p90_ms,
+                          summary->sample_stddev_ms, summary->samples);
+        }
+    }
+
+    if (has_latency_results) {
+        report("\n");
+        report_styled(color_bold_cyan, "Typing latency results\n");
+        report_styled(color_bold_cyan,
+                      "%-*s  %-*s  %12s  %12s  %12s  %9s\n",
+                      (int)terminal_width, "Terminal", (int)benchmark_width,
+                      "Benchmark", "Avg ms", "P90 ms", "SD ms", "Samples");
+        print_table_rule(terminal_width + benchmark_width + 2 * 6 + 3 * 12 + 9);
+        for (size_t i = 0; i < summaries->count; ++i) {
+            const Summary *summary = &summaries->items[i];
+            if (strcmp(summary->benchmark, "typometer") != 0 || summary->samples == 0) continue;
             report_styled(summary->complete ? color_green : color_yellow,
                           "%-*s  %-*s  %12.2f  %12.2f  %12.2f  %9u\n",
                           (int)terminal_width, summary->terminal,
@@ -876,7 +905,7 @@ static void jsonl_write_run(const AppConfig *config, const char *started_at) {
     yyjson_mut_doc *doc = jsonl_new_object(&object);
     if (doc == NULL) return;
     bool ok = yyjson_mut_obj_add_str(doc, object, "type", "run") &&
-              yyjson_mut_obj_add_uint(doc, object, "schema", 5) &&
+              yyjson_mut_obj_add_uint(doc, object, "schema", 6) &&
               yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
               yyjson_mut_obj_add_str(doc, object, "config", config->path) &&
               yyjson_mut_obj_add_str(doc, object, "monitor",
@@ -939,6 +968,19 @@ static void jsonl_write_result(const Summary *summary) {
              yyjson_mut_obj_add_real(doc, object, "startup_p90_ms",
                                      summary->sample_p90_ms) &&
              yyjson_mut_obj_add_real(doc, object, "startup_sd_ms",
+                                     summary->sample_stddev_ms);
+    }
+    /* Failed runs have no latency samples; zero would look like a measurement. */
+    if (ok && strcmp(summary->benchmark, "typometer") == 0 && !summary->samples) {
+        ok = yyjson_mut_obj_add_null(doc, object, "latency_avg_ms") &&
+             yyjson_mut_obj_add_null(doc, object, "latency_p90_ms") &&
+             yyjson_mut_obj_add_null(doc, object, "latency_sd_ms");
+    } else if (ok && strcmp(summary->benchmark, "typometer") == 0) {
+        ok = yyjson_mut_obj_add_real(doc, object, "latency_avg_ms",
+                                     summary->sample_mean_ms) &&
+             yyjson_mut_obj_add_real(doc, object, "latency_p90_ms",
+                                     summary->sample_p90_ms) &&
+             yyjson_mut_obj_add_real(doc, object, "latency_sd_ms",
                                      summary->sample_stddev_ms);
     }
     if (!ok) {

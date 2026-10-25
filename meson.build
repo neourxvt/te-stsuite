@@ -17,6 +17,10 @@ endif
 
 cc = meson.get_compiler('c')
 math = cc.find_library('m', required: true)
+# Typometer observes rendered X11 pixels and injects real XTEST key events.
+x11 = dependency('x11', static: false)
+xtst = dependency('xtst', static: false)
+threads = dependency('threads')
 
 python = import('python').find_installation('python3', required: true)
 embedded_benchmark_data = custom_target(
@@ -76,6 +80,7 @@ sources = files(
   'src/controller.c',
   'src/benchmarks.c',
   'src/benchmarks/startup.c',
+  'src/benchmarks/typometer.c',
   'src/benchmarks/vtebench_cursor_motion.c',
   'src/benchmarks/vtebench_dense_cells.c',
   'src/benchmarks/vtebench_light_cells.c',
@@ -99,6 +104,6 @@ executable(
   'te-stsuite',
   sources,
   include_directories: inc,
-  dependencies: [math],
+  dependencies: [math, x11, xtst, threads],
   install: false,
 )

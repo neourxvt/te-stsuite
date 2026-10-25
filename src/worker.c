@@ -106,6 +106,46 @@ static int compare_duration(const void *left, const void *right) {
     return (a > b) - (a < b);
 }
 
+/* Summarize either payload writes or active benchmark latency samples. */
+static bool report_samples(int control_fd, const char *name, uint64_t *durations,
+                            unsigned samples) {
+    double mean_ms = 0;
+    double p90_ms = 0;
+    double stddev_ms = 0;
+    if (samples > 0) {
+        qsort(durations, samples, sizeof(*durations), compare_duration);
+        long double sum = 0;
+        for (unsigned i = 0; i < samples; ++i) sum += durations[i];
+        long double mean = sum / samples;
+        size_t percentile_index = ((size_t)samples * 90 + 99) / 100 - 1;
+        long double variance = 0;
+        if (samples > 1) {
+            for (unsigned i = 0; i < samples; ++i) {
+                long double delta = (long double)durations[i] - mean;
+                variance += delta * delta;
+            }
+            variance /= samples - 1;
+        }
+        mean_ms = (double)(mean / 1000000.0L);
+        p90_ms = (double)durations[percentile_index] / 1000000.0;
+        stddev_ms = (double)(sqrtl(variance) / 1000000.0L);
+    }
+    return send_event(control_fd, "E %s %u %.6f %.6f %.6f\n",
+               name, samples, mean_ms, p90_ms, stddev_ms);
+}
+
+/* A calibrated active benchmark announces its own accounting boundary. */
+typedef struct {
+    int control_fd;
+    const char *name;
+} ActiveBenchmark;
+
+/* Keep the private worker protocol identical for active and payload runs. */
+static bool begin_active_benchmark(void *user) {
+    ActiveBenchmark *active = user;
+    return send_event(active->control_fd, "S %s 0\n", active->name);
+}
+
 /* Execute all suite entries inside the terminal and bracket each workload. */
 int worker_run(const AppConfig *config, const RunSelection *selection,
                const char *control_path) {
@@ -188,6 +228,32 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         if (!selection_includes_benchmark(selection, benchmark->name)) {
             continue;
         }
+        if (benchmark->execute != NULL) {
+            bool warmup = selection != NULL &&
+                          selection->phase == WORKER_PHASE_WARMUP;
+            unsigned passes = warmup ? config->options.warmup : 1;
+            bool ok = true;
+            for (unsigned pass = 0; pass < passes && ok; ++pass) {
+                BenchSamples samples = {0};
+                ActiveBenchmark active = {control_fd, benchmark->name};
+                char error[256] = {0};
+                ok = benchmark->execute(&context, &config->options, warmup,
+                                         begin_active_benchmark, &active,
+                                         &samples, error, sizeof(error));
+                if (ok && !warmup) {
+                    ok = report_samples(control_fd, benchmark->name,
+                                         samples.values, samples.count);
+                }
+                free(samples.values);
+                if (!ok) send_event(control_fd, "F %s: %s\n", benchmark->name,
+                                    error[0] ? error : "active benchmark failed");
+            }
+            if (!ok) {
+                close(control_fd);
+                return 1;
+            }
+            continue;
+        }
         BenchData data;
         char error[256] = {0};
         if (!prepare_benchmark(benchmark, &context, &config->options, &data,
@@ -263,29 +329,7 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         static const char reset[] = "\033c";
         if (ok) ok = write_all(STDOUT_FILENO, reset, sizeof(reset) - 1);
         if (ok) {
-            double mean_ms = 0;
-            double p90_ms = 0;
-            double stddev_ms = 0;
-            if (samples > 0) {
-                qsort(durations, samples, sizeof(*durations), compare_duration);
-                long double sum = 0;
-                for (unsigned i = 0; i < samples; ++i) sum += durations[i];
-                long double mean = sum / samples;
-                size_t percentile_index = ((size_t)samples * 90 + 99) / 100 - 1;
-                long double variance = 0;
-                if (samples > 1) {
-                    for (unsigned i = 0; i < samples; ++i) {
-                        long double delta = (long double)durations[i] - mean;
-                        variance += delta * delta;
-                    }
-                    variance /= samples - 1;
-                }
-                mean_ms = (double)(mean / 1000000.0L);
-                p90_ms = (double)durations[percentile_index] / 1000000.0;
-                stddev_ms = (double)(sqrtl(variance) / 1000000.0L);
-            }
-            send_event(control_fd, "E %s %u %.6f %.6f %.6f\n",
-                       benchmark->name, samples, mean_ms, p90_ms, stddev_ms);
+            ok = report_samples(control_fd, benchmark->name, durations, samples);
         } else {
             send_event(control_fd, "F %s: %s\n", benchmark->name, failure);
         }

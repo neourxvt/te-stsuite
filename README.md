@@ -1,12 +1,13 @@
 # te-stsuite
 
-`te-stsuite` benchmarks terminal emulator startup and PTY rendering workloads on
+`te-stsuite` benchmarks terminal emulator startup, typing latency, and PTY rendering workloads on
 modern Linux. The workloads are implemented in C and are based on the built-in
 benchmarks from `vtebench`, including its missing-glyph workload.
 
 ## Build and run
 
-The build requires Meson 1.3 or newer, Ninja, Python 3, a C17 compiler, and Linux procfs.
+The build requires Meson 1.3 or newer, Ninja, Python 3, a C17 compiler,
+libX11 and libXtst development packages, POSIX threads, and Linux procfs.
 Meson uses the system C compiler and its default libc, such as glibc on glibc-based
 distributions or musl on Alpine, with dynamic linking by default.
 The build maps checkout and build paths out of the binary, rejects
@@ -190,7 +191,7 @@ flat result record per measured terminal and benchmark, and one end record.
 Each warmup output record includes that terminal's captured stdout and stderr.
 Output from process isolation checks and startup samples is
 suppressed and is not recorded.
-Results are not duplicated for printed summaries. The schema version is 5.
+Results are not duplicated for printed summaries. The schema version is 6.
 Durations use seconds or milliseconds as named, memory uses
 bytes, and `cpu_pct` is percent of one core. Missing resource measurements are
 JSON null. Workload results also include payload size and write-time statistics;
@@ -199,7 +200,7 @@ partial results are marked with `"complete":false`. A check record's
 `worker_moved` indicates whether the worker joined its separate cgroup.
 
 ```jsonl
-{"type":"run","schema":5,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
+{"type":"run","schema":6,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
 {"type":"process_isolation_check","terminal":"kitty/compact","status":"passed","cgroups_used":true,"worker_moved":true,"detail":"terminal isolated on CPU 2; worker is in its separate cgroup"}
 {"type":"warmup_output","terminal":"kitty/compact","stdout":"","stderr":""}
 {"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
@@ -219,4 +220,52 @@ sample counts; it does not extend `max_seconds`.
 The suite runs startup first, followed by the ported `vtebench_*` workloads:
 cursor motion, dense cells, light cells, medium cells, scrolling, four
 scrolling-region workloads, scrolling fullscreen, synchronized medium cells,
-Unicode symbols, and missing glyphs.
+Unicode symbols, and missing glyphs. The `typometer` typing latency benchmark
+runs after the PTY workloads.
+
+## Typing latency
+
+The `typometer` benchmark ports the measurement backend from Typometer C++ to C.
+It requires a native X11 session with XTEST and a visible terminal using a
+monospaced font and a uniform, opaque background. Native Wayland and XWayland
+measurement are unsupported. The benchmark finds the terminal window through
+`_NET_WM_PID` and its worker's process ancestry, and focuses it automatically.
+Do not type, hold modifiers, move or obscure the window, or change focus during
+a run. Launch a separate terminal instance rather than attaching to a daemon.
+
+```sh
+./build/te-stsuite example.toml -t xterm -b typometer
+```
+
+The worker provides a minimal raw-mode typing target inside the terminal;
+no editor is needed. Five injected periods calibrate character spacing,
+sampling pixels, the background, and block cursor handling. Each sample times
+XTEST key injection until the corresponding pixel changes on the X11 screen.
+This includes input dispatch, the worker's echo, PTY transport, and visible
+rendering through X11. It excludes physical keyboard hardware and monitor
+scanout. Calibration uses screen reads internally; it saves no images.
+
+Root TOML options are `typometer_count` (default 100), `typometer_delay_ms`
+(default 0), `typometer_asynchronous` (default false), `typometer_pause_every`
+(default 0, disabled), and `typometer_pause_ms` (default 1000). Periodic pauses
+replace the ordinary delay. Synchronous mode waits for each screen change
+before applying the delay; asynchronous mode uses a separate input thread
+that can queue characters ahead of rendering. Both modes delete completed
+batches with Backspace. `max_samples` can cap the character count, and
+`max_seconds` bounds typing and delays. An in-flight sample can take up to
+three further seconds before timing out; batch cleanup also needs time to
+settle. Each warmup pass runs the same workload without recording results.
+
+Reports include mean, 90th percentile, and sample standard deviation of typing
+latency. JSONL results use `latency_avg_ms`, `latency_p90_ms`, and
+`latency_sd_ms`, with `samples` counting characters and `payload_bytes` zero.
+CPU and memory use the selected te-stsuite monitoring backend. Their interval
+excludes calibration and includes typing, delays, pauses, and cleanup. Focus
+changes, unexpected input, and missing pixel updates fail the run; terminal
+input settings are restored on completion, failure, and handled termination
+signals. A failed run does not report successful latency samples; its partial result
+uses null latency fields.
+
+The ported backend is licensed under Apache-2.0. See
+[NOTICE.typometer](NOTICE.typometer) and
+[LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt) for attribution and terms.

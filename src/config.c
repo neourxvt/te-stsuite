@@ -222,6 +222,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
     config->options.startup_min_seconds = 3;
     config->options.startup_min_samples = 10;
     config->options.startup_timeout_seconds = 30;
+    config->options.typometer_count = 100;
+    config->options.typometer_pause_ms = 1000;
     config->monitor_backend = MONITOR_BACKEND_CGROUPV2;
     /* Taskset works without cpuset controller delegation. */
     config->process_isolation = PROCESS_ISOLATION_TASKSET;
@@ -250,6 +252,19 @@ bool config_load(const char *path, AppConfig *config, char *error,
     unsigned long long startup_min_samples =
         config->options.startup_min_samples;
     unsigned long long startup_timeout = config->options.startup_timeout_seconds;
+    unsigned long long typometer_count = config->options.typometer_count;
+    unsigned long long typometer_delay = config->options.typometer_delay_ms;
+    unsigned long long typometer_pause_every = config->options.typometer_pause_every;
+    unsigned long long typometer_pause = config->options.typometer_pause_ms;
+    toml_datum_t asynchronous = toml_get(result.toptab, "typometer_asynchronous");
+    if (asynchronous.type != TOML_UNKNOWN && asynchronous.type != TOML_BOOLEAN) {
+        snprintf(error, error_size, "typometer_asynchronous must be a boolean");
+        toml_free(result);
+        config_free(config);
+        return false;
+    }
+    config->options.typometer_asynchronous =
+        asynchronous.type == TOML_BOOLEAN && asynchronous.u.boolean;
     toml_datum_t monitor_name = toml_get(result.toptab, "monitor");
     if (monitor_name.type != TOML_UNKNOWN) {
         char *name = copy_toml_string(monitor_name);
@@ -291,12 +306,24 @@ bool config_load(const char *path, AppConfig *config, char *error,
                  read_option(result.toptab, "startup_min_samples", UINT_MAX,
                              &startup_min_samples, error, error_size) &&
                  read_option(result.toptab, "startup_timeout_seconds", UINT_MAX,
-                             &startup_timeout, error, error_size);
+                             &startup_timeout, error, error_size) &&
+                 read_option(result.toptab, "typometer_count", UINT_MAX,
+                             &typometer_count, error, error_size) &&
+                 read_option(result.toptab, "typometer_delay_ms", UINT_MAX,
+                             &typometer_delay, error, error_size) &&
+                 read_option(result.toptab, "typometer_pause_every", UINT_MAX,
+                             &typometer_pause_every, error, error_size) &&
+                 read_option(result.toptab, "typometer_pause_ms", UINT_MAX,
+                             &typometer_pause, error, error_size);
     if (valid && (min_bytes == 0 || max_seconds == 0 ||
                   startup_min_seconds == 0 || startup_min_samples == 0 ||
                   startup_timeout == 0)) {
         snprintf(error, error_size,
                  "min_bytes, max_seconds, startup_min_seconds, startup_min_samples, and startup_timeout_seconds must be positive");
+        valid = false;
+    }
+    if (valid && typometer_count == 0) {
+        snprintf(error, error_size, "typometer_count must be positive");
         valid = false;
     }
     if (!valid) {
@@ -311,6 +338,10 @@ bool config_load(const char *path, AppConfig *config, char *error,
     config->options.startup_min_seconds = (unsigned)startup_min_seconds;
     config->options.startup_min_samples = (unsigned)startup_min_samples;
     config->options.startup_timeout_seconds = (unsigned)startup_timeout;
+    config->options.typometer_count = (unsigned)typometer_count;
+    config->options.typometer_delay_ms = (unsigned)typometer_delay;
+    config->options.typometer_pause_every = (unsigned)typometer_pause_every;
+    config->options.typometer_pause_ms = (unsigned)typometer_pause;
 
     bool parsed_terminals = false;
     for (int i = 0; i < result.toptab.u.tab.size; ++i) {
