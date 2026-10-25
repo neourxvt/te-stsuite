@@ -1,27 +1,16 @@
 #!/bin/sh
 
-# Configure a static musl build, recreating Meson's cache if its compiler changed.
+# Set up the default musl toolchain and compile the Meson project.
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-cd "$script_dir"
-compiler=${CC:-musl-gcc}
+build_dir="$script_dir/build"
+native_file="$script_dir/meson/musl.ini"
 
-if ! command -v "$compiler" >/dev/null 2>&1; then
-    printf 'cvtebench: musl compiler not found: %s\n' "$compiler" >&2
-    printf 'Install musl-gcc or set CC to a musl-targeting compiler.\n' >&2
-    exit 1
-fi
-
-if [ -f build/meson-private/coredata.dat ]; then
-    configured_compiler=$(meson introspect --compilers build |
-        sed -n 's/.*"exelist": \["\([^"]*\)"\].*/\1/p')
-    if [ "$configured_compiler" = "$compiler" ]; then
-        CC="$compiler" meson setup build --reconfigure
-    else
-        CC="$compiler" meson setup build --wipe
-    fi
+if [ -f "$build_dir/meson-private/coredata.dat" ]; then
+    meson setup "$build_dir" "$script_dir" --reconfigure --native-file "$native_file"
 else
-    CC="$compiler" meson setup build
+    meson setup "$build_dir" "$script_dir" --native-file "$native_file"
 fi
-meson compile -C build
+
+exec meson compile -C "$build_dir"

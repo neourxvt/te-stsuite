@@ -6,13 +6,24 @@ benchmarks from `vtebench`, including its missing-glyph workload.
 
 ## Build and run
 
-The build requires Meson, `musl-gcc` (or another musl-targeting compiler), and
-Linux procfs. `build.sh` uses musl and links the executable statically by
-default:
+The build requires Meson, `musl-gcc`, and Linux procfs. The checked-in Meson
+native file selects musl-gcc, and `meson.build` links the executable
+statically. Build with the convenience script:
 
 ```sh
 ./build.sh
 ```
+
+To configure Meson directly, pass the native file on the initial setup:
+
+```sh
+meson setup build --native-file meson/musl.ini
+meson compile -C build
+```
+
+Meson chooses its compiler during setup, so direct builds need this native
+file too. To use a different musl compiler, update the `c` entry in
+`meson/musl.ini`.
 
 Start with [example.toml](example.toml), or create a TOML file with one named
 table for each terminal. Each `cmd` must contain one standalone `{CMD}` word
