@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "te-stsuite.h"
+#include "te-stsuite-version.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,7 +15,7 @@ typedef struct {
 
 /* Show the run modes, selectors, workload names, and measurement flow. */
 static void print_usage(const char *program) {
-    printf("Usage: %s CONFIG.toml [OPTIONS]\n\n", program);
+    printf("Usage: %s [CONFIG.toml] [OPTIONS]\n\n", program);
     printf("Runs terminal emulator benchmarks on modern Linux from named TOML entries.\n");
     printf("It checks cgroup placement, then warms and benchmarks each selected\n");
     printf("terminal before moving to the next, with it pinned to CPU 0. The\n");
@@ -24,6 +25,7 @@ static void print_usage(const char *program) {
     printf("saved as timestamped text and JSONL logs in the current directory.\n\n");
     printf("Options:\n");
     printf("  -h, --help               Show this help\n");
+    printf("      --version            Show the te-stsuite version\n");
     printf("      --validate           Check the TOML and selectors without running\n");
     printf("  -t, --terminal NAME      Run only this terminal; repeat to select more\n");
     printf("  -b, --benchmark NAME     Run only this workload; repeat to select more\n\n");
@@ -85,6 +87,7 @@ int main(int argc, char **argv) {
     const char *socket_path = NULL;
     bool run = false;
     bool validate = false;
+    bool version = false;
     bool help = false;
     WorkerPhase worker_phase = WORKER_PHASE_BENCHMARK;
     const char *worker_cgroup_path = "-";
@@ -96,6 +99,8 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--run") == 0) {
             run = true;
+        } else if (strcmp(argv[i], "--version") == 0) {
+            version = true;
         } else if (strcmp(argv[i], "--validate") == 0) {
             validate = true;
         } else if (strcmp(argv[i], "--terminal") == 0 ||
@@ -172,6 +177,13 @@ int main(int argc, char **argv) {
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
+    }
+    /* Version reporting does not require a benchmark configuration. */
+    if (version) {
+        printf("te-stsuite %s\n", TE_STSUITE_VERSION);
+        selector_list_free(&terminals);
+        selector_list_free(&benchmarks);
+        return 0;
     }
     if (help) {
         print_usage(argv[0]);

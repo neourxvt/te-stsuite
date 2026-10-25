@@ -6,6 +6,11 @@ project(
   default_options: ['c_std=c17', 'warning_level=3'],
 )
 
+# Keep the CLI version tied to the manually maintained Meson project version.
+version_config = configuration_data()
+version_config.set_quoted('TE_STSUITE_VERSION', meson.project_version())
+configure_file(output: 'te-stsuite-version.h', configuration: version_config)
+
 if host_machine.system() != 'linux'
   error('te-stsuite supports modern Linux systems only')
 endif
@@ -35,7 +40,7 @@ foreach arg : reproducibility_args
 endforeach
 add_project_arguments(reproducibility_args, language: 'c')
 
-inc = include_directories('include', 'vendor/tomlc17', 'vendor/yyjson/src')
+inc = include_directories('.', 'include', 'vendor/tomlc17', 'vendor/yyjson/src')
 add_project_arguments(
   '-DYYJSON_DISABLE_READER=1',
   '-DYYJSON_DISABLE_INCR_READER=1',
