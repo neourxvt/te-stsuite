@@ -6,5 +6,6 @@
 
 - [x] "isolate" (can only merge) .Xresources and allow setting it in .toml explicitly
 - [x] add version str
+- [ ] rethink/refix warmup
 
 # vim: set expandtab tabstop=2 shiftwidth=2 softtabstop=2 nowrap textwidth=0:

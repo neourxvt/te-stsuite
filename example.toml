@@ -1,7 +1,7 @@
 # Minimum payload size for each workload sample, in bytes.
 min_bytes = 1048576
 # Number of unmeasured passes for each workload before measuring.
-warmup = 1
+warmup = 0
 # Maximum time to measure each workload, in seconds.
 max_seconds = 10
 # Maximum samples per workload and startup run; 0 means no sample limit.
@@ -17,13 +17,20 @@ monitor = "cgroupv2"
 # CPU placement: "cgroupv2" or "taskset".
 process_isolation = "taskset"
 
-[typometer.basic]
+[typometer.synthetic]
 # Typometer measures up to this many injected period characters per run.
 count = 100
 # Wait after each character, or type independently of rendering when true.
 delay_ms = 0
 asynchronous = false
 # Replace the normal delay every N characters; 0 disables periodic pauses.
+pause_every = 0
+pause_ms = 1000
+
+[typometer.typing]
+count = 100
+delay_ms = 40
+asynchronous = true
 pause_every = 0
 pause_ms = 1000
 
