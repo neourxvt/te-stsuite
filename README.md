@@ -42,6 +42,7 @@ startup_min_seconds = 3
 startup_min_samples = 10
 startup_timeout_seconds = 30
 monitor = "cgroupv2"
+process_isolation = "cgroupv2"
 
 [kitty]
 cmd = "kitty --config {CFG} {CMD}"
@@ -90,36 +91,40 @@ contain `{CFG}`. The worker runs inside the terminal's PTY. Terminal command
 strings use whitespace, single or double quotes, and backslash escapes; they
 are split into arguments without shell expansion.
 
-Each terminal runs in a cgroup v2 isolated cpuset partition on one automatically
-selected exclusive CPU. The benchmark worker runs on the remaining CPUs. This
-requires the cpuset controller, a writable delegated cgroup v2 subtree whose
-current cgroup is a valid partition root, and at least two effective CPUs. The
-run stops before warmup if any requirement is missing. The isolated partition
-removes the selected logical CPU from scheduler load balancing and unbound
-workqueues; it does not move interrupts or isolate SMT sibling threads.
-Avoid terminal commands that attach to an already-running daemon, since the new
+The `process_isolation` setting selects `cgroupv2` or `taskset` and defaults to
+`cgroupv2`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
+partition on one automatically selected exclusive CPU, while the benchmark
+worker runs on the remaining CPUs. This requires the cpuset controller, a
+writable delegated cgroup v2 subtree whose current cgroup is a valid partition
+root, and at least two effective CPUs. The partition removes the selected
+logical CPU from scheduler load balancing and unbound workqueues; it does not
+move interrupts or isolate SMT sibling threads. In `taskset` mode, the terminal
+and worker are pinned to CPU 0 using scheduler affinity. CPU 0 must be available
+to the process, and this mode does not reserve that CPU from other workloads.
+Both modes use cgroups to separate terminal and worker accounting. Avoid
+terminal commands that attach to an already-running daemon, since the new
 process must own the measured PTY session.
 
 ## Measurements
 
 Before measuring, te-stsuite checks whether each terminal and its worker are
-placed in separate cgroups and verifies the isolated cpuset partition. It then
-launches every selected terminal once for a separate warmup phase. It uses the
-same configured command for checks, warmup, and measured runs. The worker is
-placed outside the isolated partition on the remaining CPUs, and its resource
-use does not count toward the terminal.
+placed in separate cgroups and verifies the selected process isolation mode.
+It then launches every selected terminal once for a separate warmup phase. It
+uses the same configured command for checks, warmup, and measured runs. In
+`cgroupv2` mode, the worker runs on the remaining CPUs outside the isolated
+partition. Its resource use does not count toward the terminal.
 
-The `monitor` setting selects `cgroupv2` or `polling` and defaults to
-`cgroupv2`. Both modes use cgroup v2 cpusets for terminal isolation. The
-`cgroupv2` backend reads terminal CPU time from `cpu.stat`, and memory from
-`memory.current` and `memory.peak`; memory includes charged cache and other
-cgroup memory, not only process RSS. The `polling` backend uses the `/proc`
-process-tree sampler and reports summed RSS. Both backends report CPU as a
-percentage of one core and memory as time-weighted average and peak MiB. Each
-startup and workload result has its own interval. If cgroup delegation or
-cpuset isolation is unavailable, the check fails and the run stops before
-warmup. Missing resource counters are recorded as null; te-stsuite does not
-turn missing counters into zero or silently switch backends.
+The `monitor` setting independently selects `cgroupv2` or `polling` and defaults
+to `cgroupv2`. The `cgroupv2` backend reads terminal CPU time from `cpu.stat`,
+and memory from `memory.current` and `memory.peak`; memory includes charged cache
+and other cgroup memory, not only process RSS. The `polling` backend uses the
+`/proc` process-tree sampler and reports summed RSS. Both backends report CPU as
+a percentage of one core and memory as time-weighted average and peak MiB. Each
+startup and workload result has its own interval. If cgroup delegation is
+unavailable, the check fails and the run stops before warmup. `cgroupv2`
+process isolation additionally requires cpuset partition support. Missing
+resource counters are recorded as null; te-stsuite does not turn missing
+counter values into zero or silently switch backends.
 
 The startup benchmark launches the configured terminal repeatedly and measures
 from each launch until the in-terminal worker is ready. It gathers at least ten
@@ -145,8 +150,8 @@ JSON null. Workload results also include payload size and write-time statistics;
 partial results are marked with `"complete":false`.
 
 ```jsonl
-{"type":"run","schema":2,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2"}
-{"type":"cgroup_check","terminal":"kitty/compact","status":"inside","worker_moved":true,"detail":"terminal and worker are in separate cgroups; terminal isolated on CPU 2"}
+{"type":"run","schema":2,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
+{"type":"cgroup_check","terminal":"kitty/compact","status":"inside","worker_moved":true,"detail":"terminal isolated on CPU 2; worker is in its separate cgroup"}
 {"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
 {"type":"end","status":"ok","results":1}
 ```

@@ -30,7 +30,8 @@ static void print_usage(const char *program) {
     printf("  -t, --terminal NAME      Run only this terminal; repeat to select more\n");
     printf("  -b, --benchmark NAME     Run only this workload; repeat to select more\n\n");
     printf("TOML monitor defaults to cgroupv2; choose \"polling\" to use /proc.\n");
-    printf("Cgroup isolation checks run before warmup and measurement.\n\n");
+    printf("TOML process_isolation defaults to cgroupv2; choose \"taskset\" for CPU affinity.\n");
+    printf("Process placement checks run before warmup and measurement.\n\n");
     printf("A terminal name selects all its config variants; a name such as\n");
     printf("kitty/compact selects one variant. Workloads:\n");
     const char *benchmark_names[te_stsuite_benchmark_count];

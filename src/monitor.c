@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Keep backend selection and cgroup placement behind one stable API. */
+/* Keep resource accounting and process isolation behind stable APIs. */
 struct Monitor {
     MonitorBackend backend;
     const MonitorBackendOps *operations;
@@ -36,17 +36,20 @@ const char *monitor_backend_name(MonitorBackend backend) {
     return "unknown";
 }
 
-/* Construct the shared monitor and keep cgroup isolation available to both backends. */
-Monitor *monitor_create(MonitorBackend backend) {
+/* Construct the selected accounting backend and process isolation scope. */
+Monitor *monitor_create(MonitorBackend backend,
+                        ProcessIsolationMode process_isolation) {
     if (backend != MONITOR_BACKEND_POLLING &&
         backend != MONITOR_BACKEND_CGROUPV2) return NULL;
+    if (process_isolation != PROCESS_ISOLATION_CGROUPV2 &&
+        process_isolation != PROCESS_ISOLATION_TASKSET) return NULL;
     Monitor *monitor = calloc(1, sizeof(*monitor));
     if (monitor == NULL) return NULL;
     monitor->backend = backend;
     monitor->operations = backend == MONITOR_BACKEND_POLLING
                               ? polling_monitor_ops()
                               : cgroupv2_monitor_ops();
-    monitor->scope = cgroup_scope_create();
+    monitor->scope = cgroup_scope_create(process_isolation);
     if (monitor->scope == NULL) {
         free(monitor);
         return NULL;
@@ -64,7 +67,7 @@ void monitor_destroy(Monitor *monitor) {
     free(monitor);
 }
 
-/* Attach before exec so all terminal descendants inherit the isolated cpuset. */
+/* Attach and configure the terminal before it can create descendants. */
 bool monitor_attach_terminal(Monitor *monitor, pid_t terminal_pid) {
     if (monitor == NULL || terminal_pid <= 0) return false;
     bool attached = cgroup_scope_attach_terminal(monitor->scope, terminal_pid);
@@ -78,10 +81,10 @@ const char *monitor_worker_cgroup_path(const Monitor *monitor) {
     return cgroup_scope_worker_path(monitor->scope);
 }
 
-/* Expose the automatically selected isolated CPU for run progress output. */
-const char *monitor_isolated_cpu(const Monitor *monitor) {
+/* Expose the selected benchmark CPU for run progress output. */
+const char *monitor_selected_cpu(const Monitor *monitor) {
     if (monitor == NULL) return "-";
-    return cgroup_scope_isolated_cpu(monitor->scope);
+    return cgroup_scope_selected_cpu(monitor->scope);
 }
 
 /* Join the worker's current process to the private sibling cgroup. */

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "te-stsuite.h"
+#include "process_isolation.h"
 #include "yyjson.h"
 
 #include <errno.h>
@@ -664,7 +665,9 @@ static void jsonl_write_run(const AppConfig *config, const char *started_at) {
               yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
               yyjson_mut_obj_add_str(doc, object, "config", config->path) &&
               yyjson_mut_obj_add_str(doc, object, "monitor",
-                                     monitor_backend_name(config->monitor_backend));
+                                     monitor_backend_name(config->monitor_backend)) &&
+              yyjson_mut_obj_add_str(doc, object, "process_isolation",
+                                     process_isolation_name(config->process_isolation));
     if (!ok) {
         yyjson_mut_doc_free(doc);
         errno = ENOMEM;
@@ -1123,7 +1126,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     MonitorBackend backend = phase == WORKER_PHASE_CHECK
                                  ? MONITOR_BACKEND_CGROUPV2
                                  : config->monitor_backend;
-    Monitor *monitor = monitor_create(backend);
+    Monitor *monitor = monitor_create(backend, config->process_isolation);
     if (monitor == NULL) {
         report_styled(color_red,
                       "  Error: out of memory while creating monitor\n");
@@ -1214,13 +1217,19 @@ static bool run_terminal(const TerminalConfig *terminal,
         return false;
     }
     if (phase == WORKER_PHASE_CHECK) {
-        report_styled(color_cyan, "  Checking cgroup placement...\n");
+        report_styled(color_cyan, "  Checking process placement...\n");
     } else if (phase == WORKER_PHASE_WARMUP) {
-        report_styled(color_cyan, "  Warming terminal on isolated CPU %s...\n",
-                      monitor_isolated_cpu(monitor));
+        report_styled(color_cyan,
+                      config->process_isolation == PROCESS_ISOLATION_CGROUPV2
+                          ? "  Warming terminal on isolated CPU %s...\n"
+                          : "  Warming terminal pinned to CPU %s...\n",
+                      monitor_selected_cpu(monitor));
     } else {
-        report_styled(color_cyan, "  Starting on isolated CPU %s...\n",
-                      monitor_isolated_cpu(monitor));
+        report_styled(color_cyan,
+                      config->process_isolation == PROCESS_ISOLATION_CGROUPV2
+                          ? "  Starting on isolated CPU %s...\n"
+                          : "  Starting pinned to CPU %s...\n",
+                      monitor_selected_cpu(monitor));
     }
 
     uint64_t deadline = launch_ns +
@@ -1521,6 +1530,8 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     report_styled(color_dim, "Configuration  %s\n", config->path);
     report_styled(color_dim, "Monitor        %s\n",
                   monitor_backend_name(config->monitor_backend));
+    report_styled(color_dim, "Isolation      %s\n",
+                  process_isolation_name(config->process_isolation));
     report_styled(color_dim, "Text log       %s\n", log_path);
     report_styled(color_dim, "JSONL log      %s\n\n", jsonl_path);
     size_t selected_terminal_count = 0;
@@ -1545,7 +1556,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         return 1;
     }
 
-    report_styled(color_bold_cyan, "Cgroup isolation checks\n");
+    report_styled(color_bold_cyan, "Process isolation checks\n");
     size_t terminal_number = 0;
     size_t check_index = 0;
     bool checks_passed = true;

@@ -6,6 +6,7 @@ startup_min_seconds = 3
 startup_min_samples = 10
 startup_timeout_seconds = 30
 monitor = "cgroupv2"
+process_isolation = "cgroupv2"
 
 [alacritty]
 cmd = "alacritty -e {CMD}"

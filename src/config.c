@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "te-stsuite.h"
+#include "process_isolation.h"
 #include "tomlc17.h"
 
 #include <limits.h>
@@ -117,6 +118,7 @@ bool config_load(const char *path, AppConfig *config, char *error,
     config->options.startup_min_samples = 10;
     config->options.startup_timeout_seconds = 30;
     config->monitor_backend = MONITOR_BACKEND_CGROUPV2;
+    config->process_isolation = PROCESS_ISOLATION_CGROUPV2;
 
     char *absolute_path = realpath(path, NULL);
     if (absolute_path == NULL) {
@@ -149,6 +151,20 @@ bool config_load(const char *path, AppConfig *config, char *error,
             !monitor_backend_parse(name, &config->monitor_backend)) {
             snprintf(error, error_size,
                      "configuration key 'monitor' must be 'polling' or 'cgroupv2'");
+            free(name);
+            toml_free(result);
+            config_free(config);
+            return false;
+        }
+        free(name);
+    }
+    toml_datum_t isolation_name = toml_get(result.toptab, "process_isolation");
+    if (isolation_name.type != TOML_UNKNOWN) {
+        char *name = copy_toml_string(isolation_name);
+        if (name == NULL ||
+            !process_isolation_parse(name, &config->process_isolation)) {
+            snprintf(error, error_size,
+                     "configuration key 'process_isolation' must be 'cgroupv2' or 'taskset'");
             free(name);
             toml_free(result);
             config_free(config);

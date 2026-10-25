@@ -61,6 +61,7 @@ typedef struct {
     char *path;
     RunOptions options;
     MonitorBackend monitor_backend;
+    ProcessIsolationMode process_isolation;
     TerminalConfig *terminals;
     size_t terminal_count;
 } AppConfig;

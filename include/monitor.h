@@ -11,6 +11,12 @@ typedef enum {
     MONITOR_BACKEND_CGROUPV2,
 } MonitorBackend;
 
+/* Select how the terminal process is constrained to its benchmark CPU. */
+typedef enum {
+    PROCESS_ISOLATION_CGROUPV2,
+    PROCESS_ISOLATION_TASKSET,
+} ProcessIsolationMode;
+
 /* Keep wall timing available even when resource counters cannot be read. */
 typedef struct {
     bool resources_available;
@@ -33,14 +39,15 @@ typedef struct Monitor Monitor;
 bool monitor_backend_parse(const char *name, MonitorBackend *backend);
 const char *monitor_backend_name(MonitorBackend backend);
 
-/* Create an accounting monitor and its private cgroup scope, when possible. */
-Monitor *monitor_create(MonitorBackend backend);
+/* Create an accounting monitor and a scope using the selected CPU isolation. */
+Monitor *monitor_create(MonitorBackend backend,
+                        ProcessIsolationMode process_isolation);
 void monitor_destroy(Monitor *monitor);
 
-/* Attach the terminal launcher to its isolated cpuset before it can exec. */
+/* Attach and configure the terminal before it can exec. */
 bool monitor_attach_terminal(Monitor *monitor, pid_t terminal_pid);
 const char *monitor_worker_cgroup_path(const Monitor *monitor);
-const char *monitor_isolated_cpu(const Monitor *monitor);
+const char *monitor_selected_cpu(const Monitor *monitor);
 bool monitor_join_worker_cgroup(const char *path);
 MonitorIsolation monitor_check_isolation(Monitor *monitor,
                                          pid_t terminal_pid,

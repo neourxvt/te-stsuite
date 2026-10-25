@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,9 +21,8 @@ struct CgroupScope {
     char *worker_path;
     char *terminal_membership;
     char *worker_membership;
-    char isolated_cpu[32];
+    ProcessIsolation isolation;
     char error[512];
-    char detail[512];
     bool ready;
     bool base_created;
     bool terminal_created;
@@ -454,6 +454,148 @@ static bool set_partition_state(const char *cgroup_path, const char *state,
     return valid;
 }
 
+/* Select the exclusive CPU and inherited sets for the cgroup strategy. */
+static bool cgroupv2_isolation_select(ProcessIsolation *isolation,
+                                      const char *parent_path,
+                                      bool may_enable,
+                                      char *error, size_t error_size) {
+    if (!enable_cpuset_controller(parent_path, may_enable, error,
+                                  error_size)) return false;
+    char *isolated_cpu = NULL;
+    if (!select_isolation_cpu_sets(parent_path, &isolated_cpu,
+                                   &isolation->worker_cpus,
+                                   &isolation->memory_nodes,
+                                   error, error_size)) return false;
+    char *end = NULL;
+    errno = 0;
+    unsigned long cpu = strtoul(isolated_cpu, &end, 10);
+    bool valid = errno == 0 && end != isolated_cpu && *end == '\0' &&
+                 cpu <= UINT_MAX;
+    if (!valid) {
+        snprintf(error, error_size,
+                 "cannot parse selected isolated CPU '%s'", isolated_cpu);
+        free(isolated_cpu);
+        return false;
+    }
+    isolation->cpu = (unsigned)cpu;
+    snprintf(isolation->isolated_cpu, sizeof(isolation->isolated_cpu), "%s",
+             isolated_cpu);
+    free(isolated_cpu);
+    return true;
+}
+
+/* Create the intermediate root partition selected by this strategy. */
+static bool cgroupv2_isolation_configure_base(ProcessIsolation *isolation,
+                                              const char *base_path,
+                                              char *error,
+                                              size_t error_size) {
+    if (!configure_cpuset(base_path, isolation->isolated_cpu,
+                          isolation->memory_nodes, isolation->isolated_cpu,
+                          error, error_size) ||
+        !set_partition_state(base_path, "root", error, error_size)) {
+        return false;
+    }
+    return enable_cpuset_controller(base_path, true, error, error_size);
+}
+
+/* Isolate terminal descendants and leave the benchmark worker on other CPUs. */
+static bool cgroupv2_isolation_configure_process_groups(
+    ProcessIsolation *isolation, const char *terminal_path,
+    const char *worker_path, char *error, size_t error_size) {
+    if (!configure_cpuset(terminal_path, isolation->isolated_cpu,
+                          isolation->memory_nodes, isolation->isolated_cpu,
+                          error, error_size) ||
+        !set_partition_state(terminal_path, "isolated", error,
+                             error_size) ||
+        !configure_cpuset(worker_path, isolation->worker_cpus,
+                          isolation->memory_nodes, NULL,
+                          error, error_size)) return false;
+    char *worker_effective = read_control_value(
+        worker_path, "cpuset.cpus.effective");
+    if (worker_effective == NULL || worker_effective[0] == '\0') {
+        snprintf(error, error_size,
+                 "benchmark worker has no effective CPUs outside isolated CPU %s",
+                 isolation->isolated_cpu);
+        free(worker_effective);
+        return false;
+    }
+    free(worker_effective);
+    return true;
+}
+
+/* Cgroup placement itself attaches the terminal for this strategy. */
+static bool cgroupv2_isolation_attach_terminal(ProcessIsolation *isolation,
+                                               pid_t terminal_pid,
+                                               char *error,
+                                               size_t error_size) {
+    (void)isolation;
+    (void)terminal_pid;
+    (void)error;
+    (void)error_size;
+    return true;
+}
+
+/* Check that the terminal's child cgroup became an isolated partition. */
+static MonitorIsolation cgroupv2_isolation_check(
+    ProcessIsolation *isolation, const char *terminal_path,
+    pid_t terminal_pid, pid_t worker_pid, const char **detail) {
+    (void)terminal_pid;
+    (void)worker_pid;
+    char *partition = read_control_value(terminal_path,
+                                         "cpuset.cpus.partition");
+    char *effective_cpus = read_control_value(terminal_path,
+                                              "cpuset.cpus.effective");
+    if (partition == NULL || effective_cpus == NULL) {
+        int saved_errno = errno;
+        snprintf(isolation->detail, sizeof(isolation->detail),
+                 "cannot inspect terminal cpuset isolation: %s",
+                 strerror(saved_errno));
+        free(partition);
+        free(effective_cpus);
+        if (detail != NULL) *detail = isolation->detail;
+        return MONITOR_ISOLATION_UNAVAILABLE;
+    }
+    if (strcmp(partition, "isolated") != 0 ||
+        strcmp(effective_cpus, isolation->isolated_cpu) != 0) {
+        snprintf(isolation->detail, sizeof(isolation->detail),
+                 "terminal cpuset partition is not isolated on CPU %s (%s, CPUs %s)",
+                 isolation->isolated_cpu, partition, effective_cpus);
+        free(partition);
+        free(effective_cpus);
+        if (detail != NULL) *detail = isolation->detail;
+        return MONITOR_ISOLATION_OUTSIDE;
+    }
+    free(partition);
+    free(effective_cpus);
+    snprintf(isolation->detail, sizeof(isolation->detail),
+             "terminal isolated on CPU %s; worker is in its separate cgroup",
+             isolation->isolated_cpu);
+    if (detail != NULL) *detail = isolation->detail;
+    return MONITOR_ISOLATION_INSIDE;
+}
+
+/* Release the dynamically selected sets after the scope has been removed. */
+static void cgroupv2_isolation_destroy(ProcessIsolation *isolation) {
+    free(isolation->worker_cpus);
+    free(isolation->memory_nodes);
+    isolation->worker_cpus = NULL;
+    isolation->memory_nodes = NULL;
+}
+
+/* Register cgroup v2 with the shared process isolation operations table. */
+const ProcessIsolationOps *cgroupv2_process_isolation_ops(void) {
+    static const ProcessIsolationOps operations = {
+        .select = cgroupv2_isolation_select,
+        .configure_base = cgroupv2_isolation_configure_base,
+        .configure_process_groups =
+            cgroupv2_isolation_configure_process_groups,
+        .attach_terminal = cgroupv2_isolation_attach_terminal,
+        .check = cgroupv2_isolation_check,
+        .destroy = cgroupv2_isolation_destroy,
+    };
+    return &operations;
+}
+
 /* Check whether a cgroup path ends at the requested subgroup. */
 static bool has_final_component(const char *path, const char *component) {
     size_t path_length = strlen(path);
@@ -606,10 +748,15 @@ static void describe_cgroup_create_error(CgroupScope *scope,
     errno = saved_errno;
 }
 
-/* Create an isolated terminal partition beside the benchmark worker cgroup. */
-CgroupScope *cgroup_scope_create(void) {
+/* Create terminal and worker groups using the selected isolation strategy. */
+CgroupScope *cgroup_scope_create(ProcessIsolationMode process_isolation) {
     CgroupScope *scope = calloc(1, sizeof(*scope));
     if (scope == NULL) return NULL;
+    if (!process_isolation_init(&scope->isolation, process_isolation)) {
+        snprintf(scope->error, sizeof(scope->error),
+                 "unknown process isolation mode");
+        return scope;
+    }
     char error[sizeof(scope->error)] = {0};
     char *parent = current_cgroup_directory(error, sizeof(error));
     char *membership = current_membership_path();
@@ -628,9 +775,6 @@ CgroupScope *cgroup_scope_create(void) {
     /* A delegated systemd scope keeps its runner in this named child group. */
     const char *delegated_subgroup = getenv("TE_STSUITE_DELEGATED_SUBGROUP");
     bool delegated_systemd_scope = delegated_subgroup != NULL;
-    char *isolated_cpu = NULL;
-    char *worker_cpus = NULL;
-    char *memory_nodes = NULL;
     if (delegated_systemd_scope &&
         strcmp(delegated_subgroup, "te-stsuite-controller") != 0) {
         snprintf(scope->error, sizeof(scope->error),
@@ -666,12 +810,9 @@ CgroupScope *cgroup_scope_create(void) {
     if (delegated_systemd_scope &&
         !enable_accounting_controllers(parent, scope->error,
                                        sizeof(scope->error))) goto failed;
-    if (!enable_cpuset_controller(parent, delegated_systemd_scope,
-                                  scope->error, sizeof(scope->error))) goto failed;
-
-    if (!select_isolation_cpu_sets(parent, &isolated_cpu, &worker_cpus,
-                                   &memory_nodes, scope->error,
-                                   sizeof(scope->error))) goto failed;
+    if (!process_isolation_select(&scope->isolation, parent,
+                                  delegated_systemd_scope, scope->error,
+                                  sizeof(scope->error))) goto failed;
 
     char group_name[96];
     char worker_name[112];
@@ -708,16 +849,9 @@ CgroupScope *cgroup_scope_create(void) {
     scope->base_created = true;
 
     char isolation_error[sizeof(scope->error)] = {0};
-    if (!configure_cpuset(scope->base_path, isolated_cpu, memory_nodes,
-                          isolated_cpu, isolation_error,
-                          sizeof(isolation_error)) ||
-        !set_partition_state(scope->base_path, "root", isolation_error,
-                             sizeof(isolation_error))) {
-        snprintf(scope->error, sizeof(scope->error), "%s", isolation_error);
-        goto failed;
-    }
-    if (!enable_cpuset_controller(scope->base_path, true,
-                                  isolation_error, sizeof(isolation_error))) {
+    if (!process_isolation_configure_base(
+            &scope->isolation, scope->base_path, isolation_error,
+            sizeof(isolation_error))) {
         snprintf(scope->error, sizeof(scope->error), "%s", isolation_error);
         goto failed;
     }
@@ -742,40 +876,18 @@ CgroupScope *cgroup_scope_create(void) {
                  "cannot create worker cgroup: %s", strerror(errno));
         goto failed;
     }
-    if (!configure_cpuset(scope->terminal_path, isolated_cpu, memory_nodes,
-                          isolated_cpu, isolation_error,
-                          sizeof(isolation_error)) ||
-        !set_partition_state(scope->terminal_path, "isolated", isolation_error,
-                             sizeof(isolation_error)) ||
-        !configure_cpuset(scope->worker_path, worker_cpus, memory_nodes, NULL,
-                          isolation_error, sizeof(isolation_error))) {
+    if (!process_isolation_configure_process_groups(
+            &scope->isolation, scope->terminal_path, scope->worker_path,
+            isolation_error, sizeof(isolation_error))) {
         snprintf(scope->error, sizeof(scope->error), "%s", isolation_error);
         goto failed;
     }
-    char *worker_effective = read_control_value(scope->worker_path,
-                                                "cpuset.cpus.effective");
-    if (worker_effective == NULL || worker_effective[0] == '\0') {
-        snprintf(scope->error, sizeof(scope->error),
-                 "benchmark worker has no effective CPUs outside isolated CPU %s",
-                 isolated_cpu);
-        free(worker_effective);
-        goto failed;
-    }
-    free(worker_effective);
-    snprintf(scope->isolated_cpu, sizeof(scope->isolated_cpu), "%s",
-             isolated_cpu);
     scope->ready = true;
-    free(isolated_cpu);
-    free(worker_cpus);
-    free(memory_nodes);
     free(parent);
     free(membership);
     return scope;
 
 failed:
-    free(isolated_cpu);
-    free(worker_cpus);
-    free(memory_nodes);
     free(parent);
     free(membership);
     remove_partial_scope(scope);
@@ -814,6 +926,7 @@ void cgroup_scope_destroy(CgroupScope *scope) {
     free(scope->worker_path);
     free(scope->terminal_membership);
     free(scope->worker_membership);
+    process_isolation_destroy(&scope->isolation);
     free(scope);
 }
 
@@ -827,10 +940,26 @@ bool cgroup_scope_attach_terminal(CgroupScope *scope, pid_t terminal_pid) {
     bool moved = write_control(path, pid_text);
     int saved_errno = errno;
     free(path);
+    if (moved) {
+        char isolation_error[sizeof(scope->error)] = {0};
+        moved = process_isolation_attach_terminal(
+            &scope->isolation, terminal_pid, isolation_error,
+            sizeof(isolation_error));
+        if (!moved) {
+            saved_errno = errno;
+            snprintf(scope->error, sizeof(scope->error), "%s",
+                     isolation_error[0] == '\0'
+                         ? "cannot apply process isolation"
+                         : isolation_error);
+        }
+    }
     if (!moved) {
         scope->ready = false;
-        snprintf(scope->error, sizeof(scope->error),
-                 "cannot place terminal in cgroup: %s", strerror(saved_errno));
+        if (scope->error[0] == '\0') {
+            snprintf(scope->error, sizeof(scope->error),
+                     "cannot place terminal in cgroup: %s",
+                     strerror(saved_errno));
+        }
     }
     return moved;
 }
@@ -842,10 +971,11 @@ const char *cgroup_scope_worker_path(const CgroupScope *scope) {
                : "-";
 }
 
-/* Return the selected CPU only after its isolated partition is ready. */
-const char *cgroup_scope_isolated_cpu(const CgroupScope *scope) {
-    return scope != NULL && scope->ready && scope->isolated_cpu[0] != '\0'
-               ? scope->isolated_cpu
+/* Return the selected CPU after the configured process mode is ready. */
+const char *cgroup_scope_selected_cpu(const CgroupScope *scope) {
+    return scope != NULL && scope->ready &&
+                   scope->isolation.isolated_cpu[0] != '\0'
+               ? scope->isolation.isolated_cpu
                : "-";
 }
 
@@ -1077,37 +1207,8 @@ MonitorIsolation cgroup_scope_check(CgroupScope *scope, pid_t terminal_pid,
             "a terminal descendant is outside the terminal cgroup";
         return MONITOR_ISOLATION_OUTSIDE;
     }
-    char *partition = read_control_value(scope->terminal_path,
-                                         "cpuset.cpus.partition");
-    char *effective_cpus = read_control_value(scope->terminal_path,
-                                              "cpuset.cpus.effective");
-    if (partition == NULL || effective_cpus == NULL) {
-        int saved_errno = errno;
-        snprintf(scope->detail, sizeof(scope->detail),
-                 "cannot inspect terminal cpuset isolation: %s",
-                 strerror(saved_errno));
-        free(partition);
-        free(effective_cpus);
-        if (detail != NULL) *detail = scope->detail;
-        return MONITOR_ISOLATION_UNAVAILABLE;
-    }
-    if (strcmp(partition, "isolated") != 0 ||
-        strcmp(effective_cpus, scope->isolated_cpu) != 0) {
-        snprintf(scope->detail, sizeof(scope->detail),
-                 "terminal cpuset partition is not isolated on CPU %s (%s, CPUs %s)",
-                 scope->isolated_cpu, partition, effective_cpus);
-        free(partition);
-        free(effective_cpus);
-        if (detail != NULL) *detail = scope->detail;
-        return MONITOR_ISOLATION_OUTSIDE;
-    }
-    free(partition);
-    free(effective_cpus);
-    snprintf(scope->detail, sizeof(scope->detail),
-             "terminal and worker are in separate cgroups; terminal isolated on CPU %s",
-             scope->isolated_cpu);
-    if (detail != NULL) *detail = scope->detail;
-    return MONITOR_ISOLATION_INSIDE;
+    return process_isolation_check(&scope->isolation, scope->terminal_path,
+                                   terminal_pid, worker_pid, detail);
 }
 
 /* Expose setup failure so text and JSON reports explain missing cgroup support. */

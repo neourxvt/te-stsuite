@@ -3,9 +3,224 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Validate that CPU zero is in this process's allowed scheduler mask. */
+static bool taskset_select(ProcessIsolation *isolation,
+                           const char *parent_path, bool may_enable,
+                           char *error, size_t error_size) {
+    (void)parent_path;
+    (void)may_enable;
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) {
+        snprintf(error, error_size, "cannot inspect CPU affinity: %s",
+                 strerror(errno));
+        return false;
+    }
+    if (!CPU_ISSET(0, &allowed)) {
+        snprintf(error, error_size,
+                 "CPU 0 is not available for taskset process isolation");
+        return false;
+    }
+    isolation->cpu = 0;
+    snprintf(isolation->isolated_cpu, sizeof(isolation->isolated_cpu), "0");
+    return true;
+}
+
+/* The taskset strategy uses affinity and leaves cgroup configuration alone. */
+static bool taskset_configure_base(ProcessIsolation *isolation,
+                                   const char *base_path,
+                                   char *error, size_t error_size) {
+    (void)isolation;
+    (void)base_path;
+    (void)error;
+    (void)error_size;
+    return true;
+}
+
+/* The taskset strategy does not alter the cgroup CPU sets. */
+static bool taskset_configure_process_groups(ProcessIsolation *isolation,
+                                             const char *terminal_path,
+                                             const char *worker_path,
+                                             char *error,
+                                             size_t error_size) {
+    (void)isolation;
+    (void)terminal_path;
+    (void)worker_path;
+    (void)error;
+    (void)error_size;
+    return true;
+}
+
+/* Pin the terminal before its launch gate opens and descendants are created. */
+static bool taskset_attach_terminal(ProcessIsolation *isolation,
+                                    pid_t terminal_pid,
+                                    char *error, size_t error_size) {
+    if (process_isolation_pin_pid(terminal_pid, isolation->cpu)) return true;
+    snprintf(error, error_size, "cannot pin terminal to CPU 0: %s",
+             strerror(errno));
+    return false;
+}
+
+/* Verify the terminal and worker retained the original CPU 0 affinity. */
+static MonitorIsolation taskset_check(ProcessIsolation *isolation,
+                                      const char *terminal_path,
+                                      pid_t terminal_pid, pid_t worker_pid,
+                                      const char **detail) {
+    (void)terminal_path;
+    if (!process_isolation_pid_is_pinned(terminal_pid, isolation->cpu)) {
+        snprintf(isolation->detail, sizeof(isolation->detail),
+                 "terminal is not pinned to CPU 0");
+        if (detail != NULL) *detail = isolation->detail;
+        return MONITOR_ISOLATION_OUTSIDE;
+    }
+    if (!process_isolation_pid_is_pinned(worker_pid, isolation->cpu)) {
+        snprintf(isolation->detail, sizeof(isolation->detail),
+                 "worker is not pinned to CPU 0");
+        if (detail != NULL) *detail = isolation->detail;
+        return MONITOR_ISOLATION_OUTSIDE;
+    }
+    snprintf(isolation->detail, sizeof(isolation->detail),
+             "terminal and worker are pinned to CPU 0 by affinity");
+    if (detail != NULL) *detail = isolation->detail;
+    return MONITOR_ISOLATION_INSIDE;
+}
+
+/* Affinity state has no dynamic resources to release. */
+static void taskset_destroy(ProcessIsolation *isolation) {
+    (void)isolation;
+}
+
+static const ProcessIsolationOps taskset_ops = {
+    .select = taskset_select,
+    .configure_base = taskset_configure_base,
+    .configure_process_groups = taskset_configure_process_groups,
+    .attach_terminal = taskset_attach_terminal,
+    .check = taskset_check,
+    .destroy = taskset_destroy,
+};
+
+/* Select the shared strategy implementation for a validated mode. */
+bool process_isolation_init(ProcessIsolation *isolation,
+                            ProcessIsolationMode mode) {
+    if (isolation == NULL) return false;
+    memset(isolation, 0, sizeof(*isolation));
+    isolation->mode = mode;
+    if (mode == PROCESS_ISOLATION_CGROUPV2) {
+        isolation->ops = cgroupv2_process_isolation_ops();
+    } else if (mode == PROCESS_ISOLATION_TASKSET) {
+        isolation->ops = &taskset_ops;
+    }
+    return isolation->ops != NULL;
+}
+
+/* Select CPUs and prepare each strategy before cgroups are created. */
+bool process_isolation_select(ProcessIsolation *isolation,
+                              const char *parent_path, bool may_enable,
+                              char *error, size_t error_size) {
+    return isolation != NULL && isolation->ops != NULL &&
+           isolation->ops->select(isolation, parent_path, may_enable,
+                                  error, error_size);
+}
+
+/* Configure the intermediate cgroup through the selected strategy. */
+bool process_isolation_configure_base(ProcessIsolation *isolation,
+                                      const char *base_path,
+                                      char *error, size_t error_size) {
+    return isolation != NULL && isolation->ops != NULL &&
+           isolation->ops->configure_base(isolation, base_path,
+                                          error, error_size);
+}
+
+/* Configure terminal and worker CPU sets through the selected strategy. */
+bool process_isolation_configure_process_groups(
+    ProcessIsolation *isolation, const char *terminal_path,
+    const char *worker_path, char *error, size_t error_size) {
+    return isolation != NULL && isolation->ops != NULL &&
+           isolation->ops->configure_process_groups(
+               isolation, terminal_path, worker_path, error, error_size);
+}
+
+/* Apply any per-process setup after moving the terminal into its cgroup. */
+bool process_isolation_attach_terminal(ProcessIsolation *isolation,
+                                      pid_t terminal_pid,
+                                      char *error, size_t error_size) {
+    return isolation != NULL && isolation->ops != NULL &&
+           isolation->ops->attach_terminal(isolation, terminal_pid,
+                                           error, error_size);
+}
+
+/* Verify the selected CPU isolation strategy after the worker reports ready. */
+MonitorIsolation process_isolation_check(ProcessIsolation *isolation,
+                                         const char *terminal_path,
+                                         pid_t terminal_pid, pid_t worker_pid,
+                                         const char **detail) {
+    if (isolation == NULL || isolation->ops == NULL) {
+        if (detail != NULL) *detail = "process isolation is unavailable";
+        return MONITOR_ISOLATION_UNAVAILABLE;
+    }
+    return isolation->ops->check(isolation, terminal_path, terminal_pid,
+                                 worker_pid, detail);
+}
+
+/* Release strategy-specific CPU lists before the scope itself is destroyed. */
+void process_isolation_destroy(ProcessIsolation *isolation) {
+    if (isolation == NULL || isolation->ops == NULL) return;
+    isolation->ops->destroy(isolation);
+    isolation->ops = NULL;
+}
+
+/* Accept the two CPU placement methods exposed through the TOML setting. */
+bool process_isolation_parse(const char *name, ProcessIsolationMode *mode) {
+    if (name == NULL || mode == NULL) return false;
+    if (strcmp(name, "cgroupv2") == 0) {
+        *mode = PROCESS_ISOLATION_CGROUPV2;
+        return true;
+    }
+    if (strcmp(name, "taskset") == 0) {
+        *mode = PROCESS_ISOLATION_TASKSET;
+        return true;
+    }
+    return false;
+}
+
+/* Return the canonical TOML spelling for the selected CPU placement method. */
+const char *process_isolation_name(ProcessIsolationMode mode) {
+    switch (mode) {
+        case PROCESS_ISOLATION_CGROUPV2: return "cgroupv2";
+        case PROCESS_ISOLATION_TASKSET: return "taskset";
+    }
+    return "unknown";
+}
+
+/* Pin one process to a single CPU before it launches terminal descendants. */
+bool process_isolation_pin_pid(pid_t pid, unsigned cpu) {
+    if (pid <= 0 || cpu >= CPU_SETSIZE) {
+        errno = EINVAL;
+        return false;
+    }
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    CPU_SET(cpu, &cpus);
+    return sched_setaffinity(pid, sizeof(cpus), &cpus) == 0;
+}
+
+/* Verify that a process still has affinity to only the selected CPU. */
+bool process_isolation_pid_is_pinned(pid_t pid, unsigned cpu) {
+    if (pid <= 0 || cpu >= CPU_SETSIZE) return false;
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    if (sched_getaffinity(pid, sizeof(cpus), &cpus) != 0 ||
+        !CPU_ISSET(cpu, &cpus)) return false;
+    for (unsigned candidate = 0; candidate < CPU_SETSIZE; ++candidate) {
+        if (candidate != cpu && CPU_ISSET(candidate, &cpus)) return false;
+    }
+    return true;
+}
 
 typedef struct {
     unsigned first;
