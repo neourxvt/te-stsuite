@@ -46,6 +46,15 @@ static FILE *log_file;
 static FILE *jsonl_file;
 static size_t jsonl_result_count;
 static bool jsonl_failed;
+static bool color_enabled;
+
+static const char *const color_reset = "\033[0m";
+static const char *const color_bold_cyan = "\033[1;36m";
+static const char *const color_cyan = "\033[36m";
+static const char *const color_green = "\033[32m";
+static const char *const color_yellow = "\033[33m";
+static const char *const color_red = "\033[31m";
+static const char *const color_dim = "\033[2m";
 
 /* Match a terminal name directly, or its base name across config variants. */
 static bool terminal_name_matches(const char *configured, const char *requested) {
@@ -102,18 +111,39 @@ bool selection_includes_benchmark(const RunSelection *selection,
     return false;
 }
 
-/* Write one formatted message to both the console and the run log. */
+/* Keep terminal styling out of the plain-text log while sharing formatting. */
+static void vreport(const char *color, const char *format, va_list args) {
+    if (color_enabled && color != NULL) fputs(color, stdout);
+    va_list console_args;
+    va_copy(console_args, args);
+    vfprintf(stdout, format, console_args);
+    va_end(console_args);
+    if (color_enabled && color != NULL) fputs(color_reset, stdout);
+
+    if (log_file != NULL) {
+        va_list log_args;
+        va_copy(log_args, args);
+        vfprintf(log_file, format, log_args);
+        va_end(log_args);
+    }
+    fflush(stdout);
+    if (log_file != NULL) fflush(log_file);
+}
+
+/* Write one unstyled message to the console and run log. */
 static void report(const char *format, ...) {
     va_list args;
     va_start(args, format);
-    va_list copy;
-    va_copy(copy, args);
-    vfprintf(stdout, format, args);
-    if (log_file != NULL) vfprintf(log_file, format, copy);
-    va_end(copy);
+    vreport(NULL, format, args);
     va_end(args);
-    fflush(stdout);
-    if (log_file != NULL) fflush(log_file);
+}
+
+/* Write a colorized console message and a plain run-log message. */
+static void report_styled(const char *color, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    vreport(color, format, args);
+    va_end(args);
 }
 
 /* Append one owned word to a dynamically sized command token list. */
@@ -366,26 +396,118 @@ static bool summary_push(SummaryList *list, const Summary *summary) {
     return true;
 }
 
-/* Print measurements with core-normalized CPU and tree-resident memory. */
+/* Print one benchmark result with consistently labeled resource measurements. */
 static void print_summary(const Summary *summary) {
     double cpu_percent = summary->metrics.wall_seconds > 0
                              ? summary->metrics.cpu_seconds /
                                    summary->metrics.wall_seconds * 100.0
                              : 0;
-    report("  %-28s %8.2f ms | CPU %7.2f%% (%8.2f ms) | RAM avg %7.2f MiB, peak %7.2f MiB",
-           summary->benchmark, summary->metrics.wall_seconds * 1000.0,
-           cpu_percent, summary->metrics.cpu_seconds * 1000.0,
-           summary->metrics.average_rss_bytes / 1048576.0,
-           (double)summary->metrics.peak_rss_bytes / 1048576.0);
-    if (summary->samples > 0) {
-        report(" | write avg %.2f ms (p90 %.2f ms, sd %.2f ms) | samples %u",
-               summary->sample_mean_ms, summary->sample_p90_ms,
-               summary->sample_stddev_ms, summary->samples);
-    }
+    const char *result_color = summary->complete ? color_green : color_yellow;
+    report_styled(summary->complete ? color_bold_cyan : color_yellow,
+                  "  %s%s\n", summary->benchmark,
+                  summary->complete ? "" : "  [PARTIAL]");
+    report_styled(result_color,
+                  "    Wall       %9.2f ms   CPU %8.2f%% (%9.2f ms)   RSS avg %8.2f MiB  peak %8.2f MiB   N %u\n",
+                  summary->metrics.wall_seconds * 1000.0, cpu_percent,
+                  summary->metrics.cpu_seconds * 1000.0,
+                  summary->metrics.average_rss_bytes / 1048576.0,
+                  (double)summary->metrics.peak_rss_bytes / 1048576.0,
+                  summary->samples);
     if (summary->bytes > 0) {
-        report(" | %zu bytes/sample", summary->bytes);
+        report_styled(color_dim,
+                      "    PTY write  avg %9.2f ms   p90 %9.2f ms   sd %9.2f ms   payload %zu B/sample\n",
+                      summary->sample_mean_ms, summary->sample_p90_ms,
+                      summary->sample_stddev_ms, summary->bytes);
+    }
+    if (!summary->complete) {
+        report_styled(color_yellow,
+                      "    Result is partial because the benchmark did not finish.\n");
+    }
+}
+
+/* Extend a table rule in chunks so unusually long configured names stay safe. */
+static void print_table_rule(size_t width) {
+    static const char dashes[] =
+        "------------------------------------------------------------------------------------------------"
+        "------------------------------------------------------------------------------------------------";
+    while (width > 0) {
+        size_t chunk = width < sizeof(dashes) - 1 ? width : sizeof(dashes) - 1;
+        report_styled(color_dim, "%.*s", (int)chunk, dashes);
+        width -= chunk;
     }
     report("\n");
+}
+
+/* Return a terminal or benchmark column width large enough for its values. */
+static size_t summary_column_width(const SummaryList *summaries, bool terminal) {
+    size_t width = terminal ? strlen("Terminal") : strlen("Benchmark");
+    for (size_t i = 0; i < summaries->count; ++i) {
+        size_t length = strlen(terminal ? summaries->items[i].terminal
+                                        : summaries->items[i].benchmark);
+        if (length > width) width = length;
+    }
+    return width;
+}
+
+/* Print aligned resource and PTY timing tables for all collected results. */
+static void print_collective_summary(const SummaryList *summaries) {
+    size_t terminal_width = summary_column_width(summaries, true);
+    size_t benchmark_width = summary_column_width(summaries, false);
+    bool has_write_results = false;
+    for (size_t i = 0; i < summaries->count; ++i) {
+        if (summaries->items[i].bytes > 0) has_write_results = true;
+    }
+
+    report_styled(color_bold_cyan, "Collective results\n");
+    size_t resource_width = terminal_width + benchmark_width + 2 * 8 + 10 + 9 +
+                            10 + 13 + 13 + 7 + 9;
+    report_styled(color_bold_cyan,
+                  "%-*s  %-*s  %10s  %9s  %10s  %13s  %13s  %7s  %9s\n",
+                  (int)terminal_width, "Terminal", (int)benchmark_width,
+                  "Benchmark", "Wall ms", "CPU %", "CPU ms", "RSS avg MiB",
+                  "RSS peak MiB", "N", "Result");
+    print_table_rule(resource_width);
+    for (size_t i = 0; i < summaries->count; ++i) {
+        const Summary *summary = &summaries->items[i];
+        double cpu_percent = summary->metrics.wall_seconds > 0
+                                 ? summary->metrics.cpu_seconds /
+                                       summary->metrics.wall_seconds * 100.0
+                                 : 0;
+        report_styled(summary->complete ? color_green : color_yellow,
+                      "%-*s  %-*s  %10.2f  %9.2f  %10.2f  %13.2f  %13.2f  %7u  %9s\n",
+                      (int)terminal_width, summary->terminal,
+                      (int)benchmark_width, summary->benchmark,
+                      summary->metrics.wall_seconds * 1000.0, cpu_percent,
+                      summary->metrics.cpu_seconds * 1000.0,
+                      summary->metrics.average_rss_bytes / 1048576.0,
+                      (double)summary->metrics.peak_rss_bytes / 1048576.0,
+                      summary->samples,
+                      summary->complete ? "complete" : "partial");
+    }
+
+    if (has_write_results) {
+        report("\n");
+        report_styled(color_bold_cyan, "PTY write results\n");
+        size_t write_width = terminal_width + benchmark_width + 2 * 6 + 13 +
+                             12 + 12 + 12 + 9;
+        report_styled(color_bold_cyan,
+                      "%-*s  %-*s  %13s  %12s  %12s  %12s  %9s\n",
+                      (int)terminal_width, "Terminal", (int)benchmark_width,
+                      "Benchmark", "Payload B", "Avg ms", "P90 ms", "SD ms",
+                      "Samples");
+        print_table_rule(write_width);
+        for (size_t i = 0; i < summaries->count; ++i) {
+            const Summary *summary = &summaries->items[i];
+            if (summary->bytes == 0) continue;
+            report_styled(summary->complete ? color_green : color_yellow,
+                          "%-*s  %-*s  %13zu  %12.2f  %12.2f  %12.2f  %9u\n",
+                          (int)terminal_width, summary->terminal,
+                          (int)benchmark_width, summary->benchmark,
+                          summary->bytes, summary->sample_mean_ms,
+                          summary->sample_p90_ms, summary->sample_stddev_ms,
+                          summary->samples);
+        }
+    }
 }
 
 /* Report the first JSONL failure while allowing the run log to continue. */
@@ -656,7 +778,7 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
             if (!summary_push(summaries, &summary)) return false;
             jsonl_write_result(&summaries->items[summaries->count - 1]);
         }
-        report("[%s] ready\n", terminal->name);
+        report_styled(color_green, "  Ready\n");
         if (include_startup) print_summary(&summaries->items[summaries->count - 1]);
         (void)launch_ns;
         *ready = true;
@@ -670,7 +792,7 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         *active_bytes = bytes;
         *active = true;
         monitor_begin(monitor, monotonic_now_ns());
-        report("[%s] running %s\n", terminal->name, name);
+        report_styled(color_cyan, "  Running: %s\n", name);
         return true;
     }
     if (line[0] == 'E' && line[1] == ' ') {
@@ -700,7 +822,7 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         return true;
     }
     if (line[0] == 'F' && line[1] == ' ') {
-        report("[%s] worker error: %s\n", terminal->name, line + 2);
+        report_styled(color_red, "  Worker error: %s\n", line + 2);
         *worker_failed = true;
         *done = true;
         return true;
@@ -721,8 +843,8 @@ static bool run_terminal(const TerminalConfig *terminal,
     char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     int listener = open_control_socket(socket_path, sizeof(socket_path));
     if (listener < 0) {
-        report("[%s] cannot create control socket: %s\n", terminal->name,
-               strerror(errno));
+        report_styled(color_red, "  Error: cannot create control socket: %s\n",
+                      strerror(errno));
         return false;
     }
 
@@ -730,7 +852,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     char config_path[64] = {0};
     if (!write_inline_config(terminal, config_path, sizeof(config_path), error,
                              sizeof(error))) {
-        report("[%s] %s\n", terminal->name, error);
+        report_styled(color_red, "  Error: %s\n", error);
         close(listener);
         unlink(socket_path);
         return false;
@@ -740,7 +862,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                                  socket_path, config_path, &argc, error,
                                  sizeof(error));
     if (argv == NULL) {
-        report("[%s] %s\n", terminal->name, error);
+        report_styled(color_red, "  Error: %s\n", error);
         close(listener);
         unlink(socket_path);
         if (config_path[0] != '\0') unlink(config_path);
@@ -750,8 +872,8 @@ static bool run_terminal(const TerminalConfig *terminal,
     uint64_t launch_ns = monotonic_now_ns();
     pid_t child = fork();
     if (child < 0) {
-        report("[%s] cannot fork terminal: %s\n", terminal->name,
-               strerror(errno));
+        report_styled(color_red, "  Error: cannot fork terminal: %s\n",
+                      strerror(errno));
         free_argv(argv, argc);
         close(listener);
         unlink(socket_path);
@@ -779,8 +901,8 @@ static bool run_terminal(const TerminalConfig *terminal,
 
     ProcessMonitor *monitor = monitor_create(child, 0);
     if (monitor == NULL) {
-        report("[%s] out of memory while starting process monitor\n",
-               terminal->name);
+        report_styled(color_red,
+                      "  Error: out of memory while starting process monitor\n");
         stop_terminal(child, false, 0);
         close(listener);
         unlink(socket_path);
@@ -788,7 +910,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         return false;
     }
     monitor_begin(monitor, launch_ns);
-    report("[%s] started with CPU affinity 0\n", terminal->name);
+    report_styled(color_cyan, "  Starting with CPU affinity 0...\n");
 
     uint64_t deadline = launch_ns +
                         (uint64_t)config->options.startup_timeout_seconds *
@@ -814,11 +936,11 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (connection < 0) {
         monitor_end(monitor, monotonic_now_ns());
         if (child_reaped) {
-            report("[%s] terminal exited before the benchmark worker connected\n",
-                   terminal->name);
+            report_styled(color_red,
+                          "  Error: terminal exited before the benchmark worker connected\n");
         } else {
-            report("[%s] startup timed out after %u seconds\n", terminal->name,
-                   config->options.startup_timeout_seconds);
+            report_styled(color_red, "  Error: startup timed out after %u seconds\n",
+                          config->options.startup_timeout_seconds);
         }
         stop_terminal(child, child_reaped, child_status);
         monitor_destroy(monitor);
@@ -862,8 +984,8 @@ static bool run_terminal(const TerminalConfig *terminal,
             if (bytes < 0 && errno != EAGAIN && errno != EINTR) break;
             if (bytes > 0) {
                 if (input_length + (size_t)bytes >= sizeof(input)) {
-                    report("[%s] oversized worker control message\n",
-                           terminal->name);
+                    report_styled(color_red,
+                                  "  Error: oversized worker control message\n");
                     break;
                 }
                 memcpy(input + input_length, chunk, (size_t)bytes);
@@ -882,8 +1004,8 @@ static bool run_terminal(const TerminalConfig *terminal,
                                                 launch_ns);
                     consumed = i + 1;
                     if (!handled && !done) {
-                        report("[%s] invalid worker control event\n",
-                               terminal->name);
+                        report_styled(color_red,
+                                      "  Error: invalid worker control event\n");
                         done = true;
                         break;
                     }
@@ -896,8 +1018,8 @@ static bool run_terminal(const TerminalConfig *terminal,
             }
         }
         if (!ready && now >= deadline) {
-            report("[%s] worker did not become ready before the startup timeout\n",
-                   terminal->name);
+            report_styled(color_red,
+                          "  Error: worker did not become ready before the startup timeout\n");
             break;
         }
     }
@@ -929,6 +1051,9 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
     char log_path[128];
     char jsonl_path[128];
     char started_at[32];
+    const char *term = getenv("TERM");
+    color_enabled = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL &&
+                    (term == NULL || strcmp(term, "dumb") != 0);
     jsonl_result_count = 0;
     jsonl_failed = false;
     if (!open_run_logs(log_path, sizeof(log_path), jsonl_path,
@@ -941,9 +1066,22 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
 
     SummaryList summaries = {0};
     jsonl_write_run(config, started_at);
-    report("cvtebench run started: %s\n", config->path);
-    report("Log: %s\nJSONL: %s\n\n", log_path, jsonl_path);
+    report_styled(color_bold_cyan, "cvtebench\n");
+    report_styled(color_dim, "Terminal emulator benchmark suite\n");
+    report_styled(color_dim, "Configuration  %s\n", config->path);
+    report_styled(color_dim, "Text log       %s\n", log_path);
+    report_styled(color_dim, "JSONL log      %s\n\n", jsonl_path);
     bool all_ok = true;
+    size_t terminal_number = 0;
+    size_t selected_terminal_count = 0;
+    for (size_t i = 0; i < config->terminal_count; ++i) {
+        bool selected = selection == NULL || selection->terminal_count == 0;
+        for (size_t j = 0; !selected && j < selection->terminal_count; ++j) {
+            selected = terminal_name_matches(config->terminals[i].name,
+                                             selection->terminal_names[j]);
+        }
+        if (selected) selected_terminal_count++;
+    }
     for (size_t i = 0; i < config->terminal_count; ++i) {
         bool selected = selection == NULL || selection->terminal_count == 0;
         for (size_t j = 0; !selected && j < selection->terminal_count; ++j) {
@@ -951,28 +1089,27 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                                              selection->terminal_names[j]);
         }
         if (!selected) continue;
-        report("Terminal: %s\n", config->terminals[i].name);
+        terminal_number++;
+        report_styled(color_bold_cyan, "[%zu/%zu] %s\n",
+                      terminal_number, selected_terminal_count,
+                      config->terminals[i].name);
         size_t before = summaries.count;
         bool ok = run_terminal(&config->terminals[i], config, selection,
                                executable_path, &summaries);
         if (!ok) all_ok = false;
-        report("Summary for %s\n", config->terminals[i].name);
-        for (size_t row = before; row < summaries.count; ++row) {
-            print_summary(&summaries.items[row]);
-        }
-        report("Finished %s: %zu summaries collected\n\n",
-               config->terminals[i].name, summaries.count - before);
+        size_t collected = summaries.count - before;
+        report_styled(ok ? color_green : color_red,
+                      "  %s: %zu benchmark result%s\n\n",
+                      ok ? "Finished" : "Failed", collected,
+                      collected == 1 ? "" : "s");
     }
 
-    report("Collective summary\n");
-    for (size_t i = 0; i < summaries.count; ++i) {
-        report("[%s]", summaries.items[i].terminal);
-        print_summary(&summaries.items[i]);
-    }
+    print_collective_summary(&summaries);
     if (jsonl_failed) all_ok = false;
     jsonl_write_end(all_ok);
     if (jsonl_failed) all_ok = false;
-    report("\nLog saved to %s\nJSONL saved to %s\n", log_path, jsonl_path);
+    report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
+                  log_path, jsonl_path);
 
     free(summaries.items);
     if (fclose(jsonl_file) != 0) all_ok = false;
