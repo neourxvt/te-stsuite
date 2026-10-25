@@ -15,7 +15,7 @@ startup_timeout_seconds = 30
 # Resource accounting: "cgroupv2" or "polling".
 monitor = "cgroupv2"
 # CPU placement: "cgroupv2" or "taskset".
-process_isolation = "cgroupv2"
+process_isolation = "taskset"
 
 # Each named table configures a terminal. Its cmd must include {CMD} as a
 # standalone word; use {CFG} once when defining inline config variants below.

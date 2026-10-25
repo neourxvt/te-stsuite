@@ -223,7 +223,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
     config->options.startup_min_samples = 10;
     config->options.startup_timeout_seconds = 30;
     config->monitor_backend = MONITOR_BACKEND_CGROUPV2;
-    config->process_isolation = PROCESS_ISOLATION_CGROUPV2;
+    /* Taskset works without cpuset controller delegation. */
+    config->process_isolation = PROCESS_ISOLATION_TASKSET;
 
     char *absolute_path = realpath(path, NULL);
     if (absolute_path == NULL) {

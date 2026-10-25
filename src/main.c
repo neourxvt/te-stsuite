@@ -30,7 +30,7 @@ static void print_usage(const char *program) {
     printf("  -t, --terminal NAME      Run only this terminal; repeat to select more\n");
     printf("  -b, --benchmark NAME     Run only this workload; repeat to select more\n\n");
     printf("TOML monitor defaults to cgroupv2; choose \"polling\" to use /proc.\n");
-    printf("TOML process_isolation defaults to cgroupv2; choose \"taskset\" for CPU affinity.\n");
+    printf("TOML process_isolation defaults to taskset; choose \"cgroupv2\" for cpuset isolation.\n");
     printf("Use polling with taskset to run without cgroups.\n");
     printf("Process placement checks run before warmup and measurement.\n\n");
     printf("A terminal name selects all its config variants; a name such as\n");

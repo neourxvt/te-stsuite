@@ -42,7 +42,7 @@ startup_min_seconds = 3
 startup_min_samples = 10
 startup_timeout_seconds = 30
 monitor = "cgroupv2"
-process_isolation = "cgroupv2"
+process_isolation = "taskset"
 
 [kitty]
 cmd = "kitty --config {CFG} {CMD}"
@@ -120,7 +120,7 @@ Terminal command strings use whitespace, single or double quotes, and
 backslash escapes; they are split into arguments without shell expansion.
 
 The `process_isolation` setting selects `cgroupv2` or `taskset` and defaults to
-`cgroupv2`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
+`taskset`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
 partition on one automatically selected exclusive CPU, while the benchmark
 worker runs on the remaining CPUs. This requires the cpuset controller, a
 writable delegated cgroup v2 subtree whose current cgroup is a valid partition
@@ -134,8 +134,8 @@ monitor still requires cgroups for resource accounting. Avoid terminal
 commands that attach to an already-running daemon, since the new process must
 own the measured PTY session.
 
-To run without cgroups, configure both `monitor = "polling"` and
-`process_isolation = "taskset"`.
+To run without cgroups, configure `monitor = "polling"`; process isolation
+defaults to `taskset`.
 
 ## Measurements
 
