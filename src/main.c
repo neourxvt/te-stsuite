@@ -13,6 +13,34 @@ typedef struct {
     size_t capacity;
 } SelectorList;
 
+/* Print the registered benchmarks in a stable order for discovery. */
+static void print_benchmark_names(void) {
+    const char *benchmark_names[te_stsuite_benchmark_count];
+    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
+        benchmark_names[i] = te_stsuite_benchmarks[i].name;
+    }
+    /* Keep the listing alphabetical without changing workload execution order. */
+    for (size_t i = 1; i < te_stsuite_benchmark_count; ++i) {
+        const char *name = benchmark_names[i];
+        size_t j = i;
+        while (j > 0 && strcmp(benchmark_names[j - 1], name) > 0) {
+            benchmark_names[j] = benchmark_names[j - 1];
+            --j;
+        }
+        benchmark_names[j] = name;
+    }
+    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
+        printf("  %s\n", benchmark_names[i]);
+    }
+}
+
+/* Print every configured terminal variant in the TOML file's order. */
+static void print_terminal_names(const AppConfig *config) {
+    for (size_t i = 0; i < config->terminal_count; ++i) {
+        printf("  %s\n", config->terminals[i].name);
+    }
+}
+
 /* Show the run modes, selectors, workload names, and measurement flow. */
 static void print_usage(const char *program) {
     printf("Usage: %s [CONFIG.toml] [OPTIONS]\n\n", program);
@@ -27,31 +55,15 @@ static void print_usage(const char *program) {
     printf("  -h, --help               Show this help\n");
     printf("      --version            Show the te-stsuite version\n");
     printf("      --validate           Check the TOML and selectors without running\n");
-    printf("  -t, --terminal NAME      Run only this terminal; repeat to select more\n");
-    printf("  -b, --benchmark NAME     Run only this workload; repeat to select more\n\n");
+    printf("  -t, --terminal [NAME]    List terminals, or select one; repeat to select more\n");
+    printf("  -b, --benchmark [NAME]   List benchmarks, or select one; repeat to select more\n\n");
     printf("TOML monitor defaults to cgroupv2; choose \"polling\" to use /proc.\n");
     printf("TOML process_isolation defaults to taskset; choose \"cgroupv2\" for cpuset isolation.\n");
     printf("Use polling with taskset to run without cgroups.\n");
     printf("Process placement checks run before warmup and measurement.\n\n");
     printf("A terminal name selects all its config variants; a name such as\n");
-    printf("kitty/compact selects one variant. Workloads:\n");
-    const char *benchmark_names[te_stsuite_benchmark_count];
-    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
-        benchmark_names[i] = te_stsuite_benchmarks[i].name;
-    }
-    /* Keep the help order alphabetical without changing workload execution order. */
-    for (size_t i = 1; i < te_stsuite_benchmark_count; ++i) {
-        const char *name = benchmark_names[i];
-        size_t j = i;
-        while (j > 0 && strcmp(benchmark_names[j - 1], name) > 0) {
-            benchmark_names[j] = benchmark_names[j - 1];
-            --j;
-        }
-        benchmark_names[j] = name;
-    }
-    for (size_t i = 0; i < te_stsuite_benchmark_count; ++i) {
-        printf("  %s\n", benchmark_names[i]);
-    }
+    printf("kitty/compact selects one variant. Available benchmarks:\n");
+    print_benchmark_names();
     printf("With no selectors, all configured terminals and workloads run.\n");
 }
 
@@ -91,6 +103,8 @@ int main(int argc, char **argv) {
     bool validate = false;
     bool version = false;
     bool help = false;
+    bool list_terminals = false;
+    bool list_benchmarks = false;
     WorkerPhase worker_phase = WORKER_PHASE_BENCHMARK;
     const char *worker_cgroup_path = "-";
     bool private_worker_option = false;
@@ -111,12 +125,15 @@ int main(int argc, char **argv) {
                    strcmp(argv[i], "-b") == 0) {
             bool is_terminal = strcmp(argv[i], "--terminal") == 0 ||
                                strcmp(argv[i], "-t") == 0;
-            if (++i >= argc || argv[i][0] == '-') {
-                fprintf(stderr, "te-stsuite: %s needs a name\n",
-                        is_terminal ? "--terminal/-t" : "--benchmark/-b");
-                arguments_valid = false;
-                break;
+            if (i + 1 >= argc || argv[i + 1][0] == '-') {
+                if (is_terminal) {
+                    list_terminals = true;
+                } else {
+                    list_benchmarks = true;
+                }
+                continue;
             }
+            ++i;
             SelectorList *list = is_terminal ? &terminals : &benchmarks;
             if (!selector_list_add(list, argv[i])) {
                 fprintf(stderr, "te-stsuite: out of memory storing selectors\n");
@@ -194,6 +211,22 @@ int main(int argc, char **argv) {
         selector_list_free(&benchmarks);
         return 0;
     }
+    /* Benchmark discovery and general help do not need a terminal config. */
+    if (list_benchmarks && !list_terminals) {
+        print_usage(argv[0]);
+        selector_list_free(&terminals);
+        selector_list_free(&benchmarks);
+        return 0;
+    }
+    /* A config is needed only to enumerate configured terminal names. */
+    if (list_terminals && config_path == NULL) {
+        print_usage(argv[0]);
+        printf("Terminal names are defined by the TOML config; pass one to\n");
+        printf("list them.\n");
+        selector_list_free(&terminals);
+        selector_list_free(&benchmarks);
+        return 0;
+    }
     if (config_path == NULL) {
         fprintf(stderr, "te-stsuite: an input TOML configuration is required\n");
         print_usage(argv[0]);
@@ -239,6 +272,18 @@ int main(int argc, char **argv) {
         selector_list_free(&terminals);
         selector_list_free(&benchmarks);
         return 2;
+    }
+    /* Listing selectors print their catalogs and exit before any terminal runs. */
+    if (list_terminals || list_benchmarks) {
+        print_usage(argv[0]);
+        if (list_terminals) {
+            printf("Configured terminals:\n");
+            print_terminal_names(&config);
+        }
+        config_free(&config);
+        selector_list_free(&terminals);
+        selector_list_free(&benchmarks);
+        return 0;
     }
     if (!selection_validate(&config, &selection, error, sizeof(error))) {
         fprintf(stderr, "te-stsuite: %s\n", error);

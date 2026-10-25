@@ -89,12 +89,17 @@ and runs the suite as that user in a transient cpuset partition. It requires
 systemd 261 or newer and sudo permission to start system services. The CPUs are
 released when the service exits. `cycle.sh` is unchanged.
 
-Use repeatable `-t`/`--terminal` and `-b`/`--benchmark` selectors to limit a
-run. Terminal names match the named TOML tables; selecting a terminal with
-config variants runs every variant, while a full name such as `kitty/compact`
-selects just that variant. Benchmark names are listed by `--help`.
+Use `-t`/`--terminal` and `-b`/`--benchmark` to list names or select entries
+for a run. Bare `-b` prints help and all benchmarks without needing a config
+file. Bare `-t` prints help without a config; pass a config to also list its
+configured terminals. Add a name to either option to select it for the run;
+repeat named selectors to select more. Terminal names match the named TOML
+tables; selecting a terminal with config variants runs every variant, while a
+full name such as `kitty/compact` selects just that variant.
 
 ```sh
+./build/te-stsuite -b
+./build/te-stsuite example.toml -t
 ./build/te-stsuite example.toml --terminal kitty --terminal xterm
 ./build/te-stsuite example.toml --benchmark startup --benchmark vtebench_unicode
 ./build/te-stsuite example.toml --terminal kitty --benchmark vtebench_scrolling
