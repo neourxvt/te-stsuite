@@ -79,6 +79,7 @@ bool buffer_append_repeat(Buffer *buffer, unsigned char value, size_t count);
 bool buffer_appendf(Buffer *buffer, const char *format, ...);
 bool buffer_load_file(Buffer *buffer, const char *path);
 bool buffer_repeat_to_minimum(Buffer *buffer, size_t minimum);
+bool benchmark_data_path(char *path, size_t path_size, const char *filename);
 
 /* Configuration and execution entry points. */
 bool config_load(const char *path, AppConfig *config, char *error,

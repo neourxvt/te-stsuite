@@ -2,6 +2,7 @@ project(
   'cvtebench',
   'c',
   version: '0.1.0',
+  meson_version: '>=1.3.0',
   default_options: ['c_std=c17', 'warning_level=3'],
 )
 
@@ -16,9 +17,26 @@ endif
 
 math = cc.find_library('m', required: true)
 
+fs = import('fs')
+source_relative_to_build = fs.relative_to(
+  meson.current_source_dir(),
+  meson.current_build_dir(),
+)
+reproducibility_args = [
+  '-ffile-prefix-map=' + meson.current_build_dir() + '=/usr/src/cvtebench/build',
+  '-ffile-prefix-map=' + source_relative_to_build + '=/usr/src/cvtebench',
+  '-ffile-prefix-map=' + meson.current_source_dir() + '=/usr/src/cvtebench',
+  '-Werror=date-time',
+]
+foreach arg : reproducibility_args
+  if not cc.has_argument(arg)
+    error('the selected compiler must support reproducible build argument: ' + arg)
+  endif
+endforeach
+add_project_arguments(reproducibility_args, language: 'c')
+
 inc = include_directories('include', 'vendor/tomlc17', 'vendor/yyjson/src')
 add_project_arguments(
-  '-DCVTEBENCH_DATA_DIR="' + meson.current_source_dir() + '/data"',
   '-DYYJSON_DISABLE_READER=1',
   '-DYYJSON_DISABLE_INCR_READER=1',
   '-DYYJSON_DISABLE_UTILS=1',
@@ -30,6 +48,7 @@ sources = files(
   'src/main.c',
   'src/config.c',
   'src/buffer.c',
+  'src/data.c',
   'src/metrics.c',
   'src/worker.c',
   'src/controller.c',
@@ -51,6 +70,8 @@ sources = files(
   'vendor/tomlc17/tomlc17.c',
   'vendor/yyjson/src/yyjson.c',
 )
+
+subdir('data')
 
 executable(
   'cvtebench',

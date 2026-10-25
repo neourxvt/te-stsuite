@@ -6,9 +6,13 @@ benchmarks from `vtebench`, including its missing-glyph workload.
 
 ## Build and run
 
-The build requires Meson, `musl-gcc`, and Linux procfs. The checked-in Meson
+The build requires Meson 1.3 or newer, `musl-gcc`, and Linux procfs. The checked-in Meson
 native file selects musl-gcc, and `meson.build` links the executable
-statically. Build with the convenience script:
+statically. It also maps checkout and build paths out of the binary, rejects
+compile-time date/time macros, and places runtime data beside the executable.
+Executable binaries built from the same source and toolchain are byte-identical
+across checkout and build paths.
+Build with the convenience script:
 
 ```sh
 ./build.sh
