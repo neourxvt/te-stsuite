@@ -67,12 +67,14 @@ cmd = "nrxvt -e {CMD}"
 # X resource clients receive their font settings through XENVIRONMENT.
 [nrxvt.xresources]
 "nrxvt*font" = "xft:monospace:size=11"
+"nrxvt*skipXIM" = true
 
 [urxvt]
 cmd = "/usr/bin/urxvt -e {CMD}"
 
 [urxvt.xresources]
 "URxvt*font" = "xft:monospace:size=11"
+"URxvt*skipXim" = true
 
 [xterm]
 cmd = "xterm -e {CMD}"
@@ -106,15 +108,14 @@ family = "monospace"
 size = 11.0
 """
 
-[contour]
-cmd = "contour terminal config {CFG} profile standard {CMD}"
-
-[contour.configs]
-standard = """
-profiles:
-  standard:
-    font:
-      size: 11
-      regular:
-        family: monospace
-"""
+# [contour]
+# cmd = "contour terminal config {CFG} profile standard {CMD}"
+# [contour.configs]
+# standard = """
+# profiles:
+#   standard:
+#     font:
+#       size: 11
+#       regular:
+#         family: monospace
+# """
