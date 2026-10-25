@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "cvtebench.h"
+#include "yyjson.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -32,6 +33,7 @@ typedef struct {
     double sample_p90_ms;
     double sample_stddev_ms;
     ResourceMetrics metrics;
+    bool complete;
 } Summary;
 
 typedef struct {
@@ -41,6 +43,9 @@ typedef struct {
 } SummaryList;
 
 static FILE *log_file;
+static FILE *jsonl_file;
+static size_t jsonl_result_count;
+static bool jsonl_failed;
 
 /* Match a terminal name directly, or its base name across config variants. */
 static bool terminal_name_matches(const char *configured, const char *requested) {
@@ -383,23 +388,203 @@ static void print_summary(const Summary *summary) {
     report("\n");
 }
 
-/* Create a unique local datetime-named log in the current working directory. */
-static FILE *open_run_log(char *path, size_t path_size) {
+/* Report the first JSONL failure while allowing the run log to continue. */
+static bool jsonl_error(void) {
+    if (!jsonl_failed) {
+        int saved_errno = errno;
+        fprintf(stderr, "cvtebench: JSONL logging failed: %s\n",
+                saved_errno == 0 ? "serialization error" : strerror(saved_errno));
+    }
+    jsonl_failed = true;
+    return false;
+}
+
+/* Serialize one compact object and flush its JSONL line to disk. */
+static bool jsonl_write_doc(yyjson_mut_doc *doc, yyjson_mut_val *object) {
+    if (doc == NULL || object == NULL || jsonl_file == NULL) {
+        if (doc != NULL) yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        return jsonl_error();
+    }
+    yyjson_mut_doc_set_root(doc, object);
+    size_t length = 0;
+    char *encoded = yyjson_mut_write(doc, YYJSON_WRITE_NOFLAG, &length);
+    if (encoded == NULL) {
+        yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        return jsonl_error();
+    }
+    bool written = fwrite(encoded, 1, length, jsonl_file) == length &&
+                   fputc('\n', jsonl_file) != EOF && fflush(jsonl_file) == 0;
+    free(encoded);
+    yyjson_mut_doc_free(doc);
+    if (!written) return jsonl_error();
+    return true;
+}
+
+/* Allocate an empty object record for the next JSONL line. */
+static yyjson_mut_doc *jsonl_new_object(yyjson_mut_val **object) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+    *object = doc == NULL ? NULL : yyjson_mut_obj(doc);
+    if (*object == NULL) {
+        if (doc != NULL) yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        jsonl_error();
+        return NULL;
+    }
+    return doc;
+}
+
+/* Write run metadata once so result rows stay flat and self-contained. */
+static void jsonl_write_run(const AppConfig *config, const char *started_at) {
+    yyjson_mut_val *object = NULL;
+    yyjson_mut_doc *doc = jsonl_new_object(&object);
+    if (doc == NULL) return;
+    bool ok = yyjson_mut_obj_add_str(doc, object, "type", "run") &&
+              yyjson_mut_obj_add_uint(doc, object, "schema", 1) &&
+              yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
+              yyjson_mut_obj_add_str(doc, object, "config", config->path);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        jsonl_error();
+        return;
+    }
+    jsonl_write_doc(doc, object);
+}
+
+/* Write one unique benchmark measurement row, without repeated summaries. */
+static void jsonl_write_result(const Summary *summary) {
+    yyjson_mut_val *object = NULL;
+    yyjson_mut_doc *doc = jsonl_new_object(&object);
+    if (doc == NULL) return;
+    double cpu_percent = summary->metrics.wall_seconds > 0
+                             ? summary->metrics.cpu_seconds /
+                                   summary->metrics.wall_seconds * 100.0
+                             : 0;
+    bool ok = yyjson_mut_obj_add_str(doc, object, "type", "result") &&
+              yyjson_mut_obj_add_str(doc, object, "terminal", summary->terminal) &&
+              yyjson_mut_obj_add_str(doc, object, "benchmark", summary->benchmark) &&
+              yyjson_mut_obj_add_real(doc, object, "wall_s",
+                                      summary->metrics.wall_seconds) &&
+              yyjson_mut_obj_add_real(doc, object, "cpu_s",
+                                      summary->metrics.cpu_seconds) &&
+              yyjson_mut_obj_add_real(doc, object, "cpu_pct", cpu_percent) &&
+              yyjson_mut_obj_add_uint(doc, object, "rss_avg_bytes",
+                                      (uint64_t)summary->metrics.average_rss_bytes) &&
+              yyjson_mut_obj_add_uint(doc, object, "rss_peak_bytes",
+                                      summary->metrics.peak_rss_bytes) &&
+              yyjson_mut_obj_add_uint(doc, object, "samples", summary->samples) &&
+              yyjson_mut_obj_add_uint(doc, object, "payload_bytes",
+                                      (uint64_t)summary->bytes) &&
+              yyjson_mut_obj_add_bool(doc, object, "complete", summary->complete);
+    if (ok && summary->bytes > 0) {
+        ok = yyjson_mut_obj_add_real(doc, object, "write_avg_ms",
+                                     summary->sample_mean_ms) &&
+             yyjson_mut_obj_add_real(doc, object, "write_p90_ms",
+                                     summary->sample_p90_ms) &&
+             yyjson_mut_obj_add_real(doc, object, "write_sd_ms",
+                                     summary->sample_stddev_ms);
+    }
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        jsonl_error();
+        return;
+    }
+    if (jsonl_write_doc(doc, object)) ++jsonl_result_count;
+}
+
+/* Mark the end of a run with success and the number of result rows emitted. */
+static void jsonl_write_end(bool success) {
+    yyjson_mut_val *object = NULL;
+    yyjson_mut_doc *doc = jsonl_new_object(&object);
+    if (doc == NULL) return;
+    bool ok = yyjson_mut_obj_add_str(doc, object, "type", "end") &&
+              yyjson_mut_obj_add_str(doc, object, "status",
+                                     success ? "ok" : "failed") &&
+              yyjson_mut_obj_add_uint(doc, object, "results", jsonl_result_count);
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        jsonl_error();
+        return;
+    }
+    jsonl_write_doc(doc, object);
+}
+
+/* Create exclusive, matching datetime-named text and JSONL files in CWD. */
+static bool open_run_logs(char *log_path, size_t log_path_size,
+                          char *jsonl_path, size_t jsonl_path_size,
+                          char *started_at, size_t started_at_size,
+                          FILE **text_output, FILE **jsonl_output) {
     time_t now = time(NULL);
     struct tm local;
-    if (localtime_r(&now, &local) == NULL) return NULL;
+    if (localtime_r(&now, &local) == NULL) return false;
+    struct tm utc;
+    if (gmtime_r(&now, &utc) == NULL) return false;
     char stamp[32];
-    if (strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local) == 0) return NULL;
+    if (strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local) == 0 ||
+        strftime(started_at, started_at_size, "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        errno = EOVERFLOW;
+        return false;
+    }
 
     for (unsigned suffix = 0; suffix < 100; ++suffix) {
-        if (suffix == 0) snprintf(path, path_size, "cvtebench-%s.log", stamp);
-        else snprintf(path, path_size, "cvtebench-%s-%u.log", stamp, suffix);
-        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-        if (fd >= 0) return fdopen(fd, "w");
-        if (errno != EEXIST) return NULL;
+        char suffix_text[16] = "";
+        if (suffix > 0) snprintf(suffix_text, sizeof(suffix_text), "-%u", suffix);
+        int log_length = snprintf(log_path, log_path_size,
+                                  "cvtebench-%s%s.log", stamp, suffix_text);
+        int jsonl_length = snprintf(jsonl_path, jsonl_path_size,
+                                    "cvtebench-%s%s.jsonl", stamp, suffix_text);
+        if (log_length < 0 || (size_t)log_length >= log_path_size ||
+            jsonl_length < 0 || (size_t)jsonl_length >= jsonl_path_size) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+
+        int log_fd = open(log_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+        if (log_fd < 0) {
+            if (errno == EEXIST) continue;
+            return false;
+        }
+        int jsonl_fd = open(jsonl_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC,
+                            0644);
+        if (jsonl_fd < 0) {
+            int saved_errno = errno;
+            close(log_fd);
+            unlink(log_path);
+            if (saved_errno == EEXIST) continue;
+            errno = saved_errno;
+            return false;
+        }
+
+        FILE *text_file = fdopen(log_fd, "w");
+        if (text_file == NULL) {
+            int saved_errno = errno;
+            close(log_fd);
+            close(jsonl_fd);
+            unlink(log_path);
+            unlink(jsonl_path);
+            errno = saved_errno;
+            return false;
+        }
+        FILE *jsonl_file_stream = fdopen(jsonl_fd, "w");
+        if (jsonl_file_stream == NULL) {
+            int saved_errno = errno;
+            fclose(text_file);
+            close(jsonl_fd);
+            unlink(log_path);
+            unlink(jsonl_path);
+            errno = saved_errno;
+            return false;
+        }
+        *text_output = text_file;
+        *jsonl_output = jsonl_file_stream;
+        return true;
     }
     errno = EEXIST;
-    return NULL;
+    return false;
 }
 
 /* Create the private local control socket used by one terminal run. */
@@ -467,7 +652,9 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
             snprintf(summary.benchmark, sizeof(summary.benchmark), "startup");
             summary.samples = 1;
             summary.metrics = metrics;
+            summary.complete = true;
             if (!summary_push(summaries, &summary)) return false;
+            jsonl_write_result(&summaries->items[summaries->count - 1]);
         }
         report("[%s] ready\n", terminal->name);
         if (include_startup) print_summary(&summaries->items[summaries->count - 1]);
@@ -504,7 +691,9 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         summary.sample_p90_ms = p90_ms;
         summary.sample_stddev_ms = stddev_ms;
         summary.metrics = monitor_end(monitor, monotonic_now_ns());
+        summary.complete = true;
         if (!summary_push(summaries, &summary)) return false;
+        jsonl_write_result(&summary);
         print_summary(&summary);
         *active = false;
         active_benchmark[0] = '\0';
@@ -721,7 +910,11 @@ static bool run_terminal(const TerminalConfig *terminal,
                  active_benchmark);
         summary.bytes = active_bytes;
         summary.metrics = partial;
-        if (summary_push(summaries, &summary)) print_summary(&summary);
+        summary.complete = false;
+        if (summary_push(summaries, &summary)) {
+            jsonl_write_result(&summary);
+            print_summary(&summary);
+        }
     }
     close(connection);
     stop_terminal(child, child_reaped, child_status);
@@ -734,15 +927,22 @@ static bool run_terminal(const TerminalConfig *terminal,
 int controller_run(const AppConfig *config, const RunSelection *selection,
                    const char *executable_path) {
     char log_path[128];
-    log_file = open_run_log(log_path, sizeof(log_path));
-    if (log_file == NULL) {
-        fprintf(stderr, "cvtebench: cannot create run log: %s\n", strerror(errno));
+    char jsonl_path[128];
+    char started_at[32];
+    jsonl_result_count = 0;
+    jsonl_failed = false;
+    if (!open_run_logs(log_path, sizeof(log_path), jsonl_path,
+                       sizeof(jsonl_path), started_at, sizeof(started_at),
+                       &log_file, &jsonl_file)) {
+        fprintf(stderr, "cvtebench: cannot create run logs: %s\n",
+                strerror(errno));
         return 1;
     }
 
     SummaryList summaries = {0};
+    jsonl_write_run(config, started_at);
     report("cvtebench run started: %s\n", config->path);
-    report("Log: %s\n\n", log_path);
+    report("Log: %s\nJSONL: %s\n\n", log_path, jsonl_path);
     bool all_ok = true;
     for (size_t i = 0; i < config->terminal_count; ++i) {
         bool selected = selection == NULL || selection->terminal_count == 0;
@@ -769,10 +969,15 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         report("[%s]", summaries.items[i].terminal);
         print_summary(&summaries.items[i]);
     }
-    report("\nLog saved to %s\n", log_path);
+    if (jsonl_failed) all_ok = false;
+    jsonl_write_end(all_ok);
+    if (jsonl_failed) all_ok = false;
+    report("\nLog saved to %s\nJSONL saved to %s\n", log_path, jsonl_path);
 
     free(summaries.items);
-    fclose(log_file);
+    if (fclose(jsonl_file) != 0) all_ok = false;
+    jsonl_file = NULL;
+    if (fclose(log_file) != 0) all_ok = false;
     log_file = NULL;
     return all_ok ? 0 : 1;
 }

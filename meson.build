@@ -16,9 +16,14 @@ endif
 
 math = cc.find_library('m', required: true)
 
-inc = include_directories('include', 'vendor/tomlc17')
+inc = include_directories('include', 'vendor/tomlc17', 'vendor/yyjson/src')
 add_project_arguments(
   '-DCVTEBENCH_DATA_DIR="' + meson.current_source_dir() + '/data"',
+  '-DYYJSON_DISABLE_READER=1',
+  '-DYYJSON_DISABLE_INCR_READER=1',
+  '-DYYJSON_DISABLE_UTILS=1',
+  '-DYYJSON_DISABLE_FILE=1',
+  '-DYYJSON_DISABLE_NON_STANDARD=1',
   language: 'c',
 )
 sources = files(
@@ -44,6 +49,7 @@ sources = files(
   'src/benchmarks/unicode.c',
   'src/benchmarks/missing.c',
   'vendor/tomlc17/tomlc17.c',
+  'vendor/yyjson/src/yyjson.c',
 )
 
 executable(

@@ -20,8 +20,7 @@ static void print_usage(const char *program) {
     printf("a worker in its PTY. It samples process-tree CPU time and RSS for startup\n");
     printf("and each selected workload, and records PTY write times. Results are\n");
     printf("printed per benchmark, summarized per terminal and collectively, and\n");
-    printf("saved to a timestamped log\n");
-    printf("in the current directory.\n\n");
+    printf("saved as timestamped text and JSONL logs in the current directory.\n\n");
     printf("Options:\n");
     printf("  -h, --help               Show this help\n");
     printf("      --validate           Check the TOML and selectors without running\n");

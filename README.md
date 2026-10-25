@@ -101,8 +101,22 @@ the write average, 90th percentile, and standard deviation cover measured
 payload writes and exclude the per-sample reset and setup bytes.
 
 The report is printed after every benchmark and as a collective summary after
-all terminals finish. A matching log is created in the current working
-directory as `cvtebench-YYYYMMDD-HHMMSS.log`.
+all terminals finish. Matching logs are created in the current working
+directory as `cvtebench-YYYYMMDD-HHMMSS.log` and
+`cvtebench-YYYYMMDD-HHMMSS.jsonl`.
+
+The JSONL file is compact and contains one run metadata record, one flat result
+record per measured terminal and benchmark, and one end record. Results are
+not duplicated for the printed summaries. Durations use seconds or
+milliseconds as named, memory uses bytes, and `cpu_pct` is percent of one core.
+Workload results also include payload size and write-time statistics; partial
+results are marked with `"complete":false`.
+
+```jsonl
+{"type":"run","schema":1,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml"}
+{"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"cpu_s":0.01,"cpu_pct":12.5,"rss_avg_bytes":7340032,"rss_peak_bytes":8388608,"samples":1,"payload_bytes":0,"complete":true}
+{"type":"end","status":"ok","results":1}
+```
 
 Configuration options default to 1 MiB minimum payloads, one warmup, ten
 seconds per workload, unlimited samples within that time, and a 30 second
