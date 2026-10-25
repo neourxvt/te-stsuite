@@ -34,10 +34,20 @@ typedef struct {
     bool complete;
 } Summary;
 
+/* Retain one output stream without changing the bytes emitted by the process. */
+typedef struct {
+    char *data;
+    size_t length;
+    size_t capacity;
+} CapturedStream;
+
 /* One independently launched terminal sample for the startup benchmark. */
 typedef struct {
     uint64_t duration_ns;
     MonitorMetrics metrics;
+    CapturedStream stdout_output;
+    CapturedStream stderr_output;
+    bool launched;
 } StartupSample;
 
 typedef struct {
@@ -62,6 +72,10 @@ static FILE *jsonl_file;
 static size_t jsonl_result_count;
 static bool jsonl_failed;
 static bool color_enabled;
+
+static bool jsonl_error(void);
+static bool jsonl_write_doc(yyjson_mut_doc *doc, yyjson_mut_val *object);
+static yyjson_mut_doc *jsonl_new_object(yyjson_mut_val **object);
 
 static const char *const color_reset = "\033[0m";
 static const char *const color_bold_cyan = "\033[1;36m";
@@ -182,6 +196,166 @@ static void report_styled(const char *color, const char *format, ...) {
     va_start(args, format);
     vreport(color, format, args);
     va_end(args);
+}
+
+/* Retain bytes from a startup invocation without imposing a text encoding. */
+static bool captured_stream_append(CapturedStream *stream,
+                                   const char *data, size_t length) {
+    if (length > SIZE_MAX - stream->length) {
+        errno = EOVERFLOW;
+        return false;
+    }
+    size_t needed = stream->length + length;
+    if (needed > stream->capacity) {
+        size_t capacity = stream->capacity == 0 ? 4096 : stream->capacity;
+        while (capacity < needed) {
+            if (capacity > SIZE_MAX / 2) {
+                capacity = needed;
+                break;
+            }
+            capacity *= 2;
+        }
+        char *data_buffer = realloc(stream->data, capacity);
+        if (data_buffer == NULL) return false;
+        stream->data = data_buffer;
+        stream->capacity = capacity;
+    }
+    memcpy(stream->data + stream->length, data, length);
+    stream->length = needed;
+    return true;
+}
+
+/* Free a captured stream after its console, text-log, and JSONL copies exist. */
+static void captured_stream_free(CapturedStream *stream) {
+    free(stream->data);
+    memset(stream, 0, sizeof(*stream));
+}
+
+/* Drain one nonblocking pipe, returning one at EOF and zero when it would wait. */
+static int capture_available(int fd, CapturedStream *stream) {
+    char buffer[4096];
+    for (;;) {
+        ssize_t bytes = read(fd, buffer, sizeof(buffer));
+        if (bytes > 0) {
+            if (!captured_stream_append(stream, buffer, (size_t)bytes)) {
+                return -1;
+            }
+            continue;
+        }
+        if (bytes == 0) return 1;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        return -1;
+    }
+}
+
+/* Make only the capture read end nonblocking so child writes remain ordinary. */
+static bool set_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL);
+    return flags >= 0 && fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+/* Close a pipe pair after setup or after its child has been stopped. */
+static void close_pipe_pair(int pipe_fds[2]) {
+    for (size_t i = 0; i < 2; ++i) {
+        if (pipe_fds[i] >= 0) close(pipe_fds[i]);
+        pipe_fds[i] = -1;
+    }
+}
+
+/* Drain available output and close a stream after EOF or a capture error. */
+static bool capture_startup_streams(int *stdout_fd, int *stderr_fd,
+                                   StartupSample *sample) {
+    int *fds[] = {stdout_fd, stderr_fd};
+    CapturedStream *streams[] = {&sample->stdout_output,
+                                 &sample->stderr_output};
+    bool ok = true;
+    for (size_t i = 0; i < 2; ++i) {
+        if (*fds[i] < 0) continue;
+        int result = capture_available(*fds[i], streams[i]);
+        if (result == 1) {
+            close(*fds[i]);
+            *fds[i] = -1;
+        } else if (result < 0) {
+            int saved_errno = errno;
+            close(*fds[i]);
+            *fds[i] = -1;
+            errno = saved_errno;
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+/* Record a startup launch's output in both run artifacts. */
+static bool write_startup_output(const char *terminal, unsigned sample_number,
+                                 const StartupSample *sample) {
+    bool ok = true;
+    if (log_file != NULL) {
+        if (fprintf(log_file,
+                    "Captured stdout (%s, startup invocation %u):\n",
+                    terminal, sample_number) < 0 ||
+            (sample->stdout_output.length > 0 &&
+             fwrite(sample->stdout_output.data, 1,
+                    sample->stdout_output.length, log_file) !=
+                 sample->stdout_output.length) ||
+            (sample->stdout_output.length > 0 &&
+             sample->stdout_output.data[sample->stdout_output.length - 1] != '\n' &&
+             fputc('\n', log_file) == EOF) ||
+            fprintf(log_file,
+                    "Captured stderr (%s, startup invocation %u):\n",
+                    terminal, sample_number) < 0 ||
+            (sample->stderr_output.length > 0 &&
+             fwrite(sample->stderr_output.data, 1,
+                    sample->stderr_output.length, log_file) !=
+                 sample->stderr_output.length) ||
+            (sample->stderr_output.length > 0 &&
+             sample->stderr_output.data[sample->stderr_output.length - 1] != '\n' &&
+             fputc('\n', log_file) == EOF) ||
+            fflush(log_file) != 0) {
+            ok = false;
+        }
+    }
+
+    yyjson_mut_val *object = NULL;
+    yyjson_mut_doc *doc = jsonl_new_object(&object);
+    if (doc == NULL) return false;
+    bool json_ok = yyjson_mut_obj_add_str(doc, object, "type",
+                                          "startup_output") &&
+                   yyjson_mut_obj_add_str(doc, object, "terminal", terminal) &&
+                   yyjson_mut_obj_add_uint(doc, object, "sample",
+                                           sample_number) &&
+                   yyjson_mut_obj_add_strn(doc, object, "stdout",
+                                           sample->stdout_output.data == NULL
+                                               ? ""
+                                               : sample->stdout_output.data,
+                                           sample->stdout_output.length) &&
+                   yyjson_mut_obj_add_strn(doc, object, "stderr",
+                                           sample->stderr_output.data == NULL
+                                               ? ""
+                                               : sample->stderr_output.data,
+                                           sample->stderr_output.length);
+    if (!json_ok) {
+        yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        jsonl_error();
+        return false;
+    }
+    return jsonl_write_doc(doc, object) && ok;
+}
+
+/* Replay only the first startup launch while every launch remains captured. */
+static void print_first_startup_output(const StartupSample *sample) {
+    if (sample->stdout_output.length > 0) {
+        fwrite(sample->stdout_output.data, 1, sample->stdout_output.length,
+               stdout);
+        fflush(stdout);
+    }
+    if (sample->stderr_output.length > 0) {
+        fwrite(sample->stderr_output.data, 1, sample->stderr_output.length,
+               stderr);
+        fflush(stderr);
+    }
 }
 
 /* Append one owned word to a dynamically sized command token list. */
@@ -694,7 +868,7 @@ static void jsonl_write_run(const AppConfig *config, const char *started_at) {
     yyjson_mut_doc *doc = jsonl_new_object(&object);
     if (doc == NULL) return;
     bool ok = yyjson_mut_obj_add_str(doc, object, "type", "run") &&
-              yyjson_mut_obj_add_uint(doc, object, "schema", 3) &&
+              yyjson_mut_obj_add_uint(doc, object, "schema", 4) &&
               yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
               yyjson_mut_obj_add_str(doc, object, "config", config->path) &&
               yyjson_mut_obj_add_str(doc, object, "monitor",
@@ -1092,7 +1266,7 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
             if (!summary_push(summaries, &summary)) return false;
             jsonl_write_result(&summaries->items[summaries->count - 1]);
         }
-        if (phase != WORKER_PHASE_CHECK) {
+        if (phase != WORKER_PHASE_CHECK && phase != WORKER_PHASE_STARTUP) {
             report_styled(color_green, "  Ready\n");
         }
         if (phase == WORKER_PHASE_BENCHMARK && include_startup) {
@@ -1171,6 +1345,13 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (startup_sample != NULL) {
         memset(startup_sample, 0, sizeof(*startup_sample));
     }
+    bool capture_outputs = phase == WORKER_PHASE_STARTUP &&
+                           startup_sample != NULL;
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
+    int stdout_fd = -1;
+    int stderr_fd = -1;
+    int capture_errno = 0;
     char control_path[128] = {0};
     int keepalive_fd = -1;
     int control_fd = open_control_fifo(control_path, sizeof(control_path),
@@ -1230,10 +1411,17 @@ static bool run_terminal(const TerminalConfig *terminal,
         monitor_destroy(monitor);
         return false;
     }
-    pid_t child = fork();
-    if (child < 0) {
-        report_styled(color_red, "  Error: cannot fork terminal: %s\n",
-                      strerror(errno));
+    if (capture_outputs &&
+        (pipe2(stdout_pipe, O_CLOEXEC) != 0 ||
+         pipe2(stderr_pipe, O_CLOEXEC) != 0 ||
+         !set_nonblocking(stdout_pipe[0]) ||
+         !set_nonblocking(stderr_pipe[0]))) {
+        int saved_errno = errno;
+        report_styled(color_red,
+                      "  Error: cannot create startup output capture pipes: %s\n",
+                      strerror(saved_errno));
+        close_pipe_pair(stdout_pipe);
+        close_pipe_pair(stderr_pipe);
         free_argv(argv, argc);
         close(gate[0]);
         close(gate[1]);
@@ -1242,8 +1430,35 @@ static bool run_terminal(const TerminalConfig *terminal,
         monitor_destroy(monitor);
         return false;
     }
+    pid_t child = fork();
+    if (child < 0) {
+        report_styled(color_red, "  Error: cannot fork terminal: %s\n",
+                      strerror(errno));
+        free_argv(argv, argc);
+        close(gate[0]);
+        close(gate[1]);
+        close_pipe_pair(stdout_pipe);
+        close_pipe_pair(stderr_pipe);
+        close_control_fifo(control_fd, keepalive_fd, control_path);
+        cleanup_terminal_files(config_path, xresources_path);
+        monitor_destroy(monitor);
+        return false;
+    }
     if (child == 0) {
         close(gate[1]);
+        if (capture_outputs) {
+            close(stdout_pipe[0]);
+            close(stderr_pipe[0]);
+            if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 ||
+                dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+                dprintf(STDERR_FILENO,
+                        "te-stsuite: cannot capture terminal output: %s\n",
+                        strerror(errno));
+                _exit(126);
+            }
+            close(stdout_pipe[1]);
+            close(stderr_pipe[1]);
+        }
         setpgid(0, 0);
         char release = 0;
         ssize_t gate_result;
@@ -1267,6 +1482,16 @@ static bool run_terminal(const TerminalConfig *terminal,
         _exit(127);
     }
     close(gate[0]);
+    if (capture_outputs) {
+        close(stdout_pipe[1]);
+        stdout_pipe[1] = -1;
+        close(stderr_pipe[1]);
+        stderr_pipe[1] = -1;
+        stdout_fd = stdout_pipe[0];
+        stderr_fd = stderr_pipe[0];
+        stdout_pipe[0] = -1;
+        stderr_pipe[0] = -1;
+    }
     setpgid(child, child);
     free_argv(argv, argc);
     if (!monitor_attach_terminal(monitor, child)) {
@@ -1274,6 +1499,11 @@ static bool run_terminal(const TerminalConfig *terminal,
                       monitor_scope_error(monitor));
         close(gate[1]);
         stop_terminal(child, false, 0);
+        if (capture_outputs) {
+            capture_startup_streams(&stdout_fd, &stderr_fd, startup_sample);
+            if (stdout_fd >= 0) close(stdout_fd);
+            if (stderr_fd >= 0) close(stderr_fd);
+        }
         close_control_fifo(control_fd, keepalive_fd, control_path);
         cleanup_terminal_files(config_path, xresources_path);
         monitor_destroy(monitor);
@@ -1290,11 +1520,17 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (released != 1) {
         report_styled(color_red, "  Error: cannot release terminal launch gate\n");
         stop_terminal(child, false, 0);
+        if (capture_outputs) {
+            capture_startup_streams(&stdout_fd, &stderr_fd, startup_sample);
+            if (stdout_fd >= 0) close(stdout_fd);
+            if (stderr_fd >= 0) close(stderr_fd);
+        }
         close_control_fifo(control_fd, keepalive_fd, control_path);
         cleanup_terminal_files(config_path, xresources_path);
         monitor_destroy(monitor);
         return false;
     }
+    if (capture_outputs) startup_sample->launched = true;
     if (phase == WORKER_PHASE_CHECK) {
         report_styled(color_cyan, "  Checking process placement...\n");
     } else if (phase == WORKER_PHASE_WARMUP) {
@@ -1303,7 +1539,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                           ? "  Warming terminal on isolated CPU %s...\n"
                           : "  Warming terminal pinned to CPU %s...\n",
                       monitor_selected_cpu(monitor));
-    } else {
+    } else if (phase != WORKER_PHASE_STARTUP) {
         report_styled(color_cyan,
                       config->process_isolation == PROCESS_ISOLATION_CGROUPV2
                           ? "  Starting on isolated CPU %s...\n"
@@ -1320,6 +1556,11 @@ static bool run_terminal(const TerminalConfig *terminal,
     while (!worker_started && monotonic_now_ns() < deadline) {
         struct pollfd event = {.fd = control_fd, .events = POLLIN};
         int polled = poll(&event, 1, 20);
+        if (capture_outputs && startup_sample != NULL &&
+            !capture_startup_streams(&stdout_fd, &stderr_fd, startup_sample) &&
+            capture_errno == 0) {
+            capture_errno = errno;
+        }
         monitor_tick(monitor, monotonic_now_ns());
         if (polled < 0 && errno != EINTR) break;
         if (event.revents & POLLIN) {
@@ -1347,6 +1588,20 @@ static bool run_terminal(const TerminalConfig *terminal,
                           config->options.startup_timeout_seconds);
         }
         stop_terminal(child, child_reaped, child_status);
+        if (capture_outputs && startup_sample != NULL) {
+            if (!capture_startup_streams(&stdout_fd, &stderr_fd,
+                                         startup_sample) &&
+                capture_errno == 0) {
+                capture_errno = errno;
+            }
+            if (stdout_fd >= 0) close(stdout_fd);
+            if (stderr_fd >= 0) close(stderr_fd);
+        }
+        if (capture_errno != 0) {
+            report_styled(color_red,
+                          "  Error: cannot capture terminal output: %s\n",
+                          strerror(capture_errno));
+        }
         close_control_fifo(control_fd, keepalive_fd, control_path);
         monitor_destroy(monitor);
         cleanup_terminal_files(config_path, xresources_path);
@@ -1387,6 +1642,11 @@ static bool run_terminal(const TerminalConfig *terminal,
         struct pollfd event = {.fd = control_fd, .events = POLLIN};
         int polled = poll(&event, 1, 20);
         uint64_t now = monotonic_now_ns();
+        if (capture_outputs && startup_sample != NULL &&
+            !capture_startup_streams(&stdout_fd, &stderr_fd, startup_sample) &&
+            capture_errno == 0) {
+            capture_errno = errno;
+        }
         if (!ready || active) monitor_tick(monitor, now);
         if (polled < 0 && errno != EINTR) break;
         if (event.revents & (POLLIN | POLLHUP)) {
@@ -1452,9 +1712,21 @@ static bool run_terminal(const TerminalConfig *terminal,
     }
     close_control_fifo(control_fd, keepalive_fd, control_path);
     stop_terminal(child, child_reaped, child_status);
+    if (capture_outputs && startup_sample != NULL) {
+        if (!capture_startup_streams(&stdout_fd, &stderr_fd, startup_sample) &&
+            capture_errno == 0) {
+            capture_errno = errno;
+        }
+        if (stdout_fd >= 0) close(stdout_fd);
+        if (stderr_fd >= 0) close(stderr_fd);
+    }
+    if (capture_errno != 0) {
+        report_styled(color_red, "  Error: cannot capture terminal output: %s\n",
+                      strerror(capture_errno));
+    }
     monitor_destroy(monitor);
     cleanup_terminal_files(config_path, xresources_path);
-    return ready && done && !worker_failed &&
+    return ready && done && !worker_failed && capture_errno == 0 &&
            (phase != WORKER_PHASE_CHECK ||
             (check_result != NULL && check_result->passed));
 }
@@ -1507,11 +1779,20 @@ static bool run_startup_benchmark(const TerminalConfig *terminal,
             capacity = next_capacity;
         }
 
-        report_styled(color_dim, "  Startup sample %u\n", samples + 1);
         StartupSample sample;
-        if (!run_terminal(terminal, config, selection, executable_path,
-                          WORKER_PHASE_STARTUP, summaries, NULL, false,
-                          &sample)) {
+        bool sample_ok = run_terminal(terminal, config, selection,
+                                      executable_path, WORKER_PHASE_STARTUP,
+                                      summaries, NULL, false, &sample);
+        unsigned sample_number = samples + 1;
+        bool output_ok = true;
+        if (sample.launched) {
+            output_ok = write_startup_output(terminal->name, sample_number,
+                                             &sample);
+            if (sample_number == 1) print_first_startup_output(&sample);
+        }
+        captured_stream_free(&sample.stdout_output);
+        captured_stream_free(&sample.stderr_output);
+        if (!sample_ok || !output_ok) {
             ok = false;
             break;
         }
@@ -1765,14 +2046,10 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                           "  %s: Warmup\n", warmup_ok ? "Finished" : "Failed");
 
             if (startup_selected) {
-                report_styled(color_dim, "  Startup benchmark\n");
                 bool startup_ok = run_startup_benchmark(
                     &config->terminals[i], config, selection,
                     executable_path, &summaries);
                 if (!startup_ok) all_ok = false;
-                report_styled(startup_ok ? color_green : color_red,
-                              "  %s: Startup benchmark\n",
-                              startup_ok ? "Finished" : "Failed");
             }
 
             if (workload_count > 0) {
