@@ -741,6 +741,9 @@ static void print_cgroup_check_summary(const CgroupCheckResult *results,
                       result->detail[0] == '\0' ? "check did not complete"
                                                  : result->detail);
     }
+    report("\nRun cvtebench inside a writable cgroup v2 subtree delegated by\n");
+    report("the system or container manager. Do not change permissions on\n");
+    report("/sys/fs/cgroup itself.\n");
 }
 
 /* Mark the end of a run with success and the number of result rows emitted. */
