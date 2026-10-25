@@ -707,10 +707,10 @@ static void jsonl_write_cgroup_check(const char *terminal,
     jsonl_write_doc(doc, object);
 }
 
-/* Return a short status label for both the check table and structured log. */
+/* Return a short human-facing status label for the failure summary. */
 static const char *cgroup_check_status(MonitorIsolation isolation) {
     switch (isolation) {
-        case MONITOR_ISOLATION_INSIDE: return "inside";
+        case MONITOR_ISOLATION_INSIDE: return "passed";
         case MONITOR_ISOLATION_OUTSIDE: return "outside";
         case MONITOR_ISOLATION_UNAVAILABLE: return "unavailable";
     }
@@ -913,7 +913,7 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                                                : detail);
             }
             if (isolation == MONITOR_ISOLATION_INSIDE) {
-                report_styled(color_green, "  Cgroup check: inside (%s)\n",
+                report_styled(color_green, "  Cgroup check: passed (%s)\n",
                               detail == NULL ? "ok" : detail);
             } else if (isolation == MONITOR_ISOLATION_OUTSIDE) {
                 report_styled(color_red, "  Cgroup check: outside (%s)\n",
