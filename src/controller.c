@@ -198,6 +198,14 @@ static void report_styled(const char *color, const char *format, ...) {
     va_end(args);
 }
 
+/* Print the suite banner to the console and the run's text log. */
+static void print_banner(void) {
+    report_styled(color_cyan,
+                  "░▀█▀░█▀▀░░░░░█▀▀░▀█▀░█▀▀░█░█░▀█▀░▀█▀░█▀▀\n"
+                  "░░█░░█▀▀░▄▄▄░▀▀█░░█░░▀▀█░█░█░░█░░░█░░█▀▀\n"
+                  "░░▀░░▀▀▀░░░░░▀▀▀░░▀░░▀▀▀░▀▀▀░▀▀▀░░▀░░▀▀▀\n");
+}
+
 /* Retain bytes from a startup invocation without imposing a text encoding. */
 static bool captured_stream_append(CapturedStream *stream,
                                    const char *data, size_t length) {
@@ -1939,7 +1947,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
 
     SummaryList summaries = {0};
     jsonl_write_run(config, started_at);
-    report_styled(color_bold_cyan, "te-stsuite\n");
+    print_banner();
     report_styled(color_dim, "Terminal emulator benchmark suite\n");
     report_styled(color_dim, "Configuration  %s\n", config->path);
     report_styled(color_dim, "Monitor        %s\n",
