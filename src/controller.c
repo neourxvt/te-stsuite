@@ -1553,6 +1553,60 @@ static bool run_startup_benchmark(const TerminalConfig *terminal,
     return ok && complete;
 }
 
+/* Atomically point a stable name at one completed run log. */
+static bool replace_latest_log_link(const char *link_path,
+                                    const char *target_path) {
+    char temporary_path[128];
+    for (unsigned attempt = 0; attempt < 100; ++attempt) {
+        int length = snprintf(temporary_path, sizeof(temporary_path),
+                              ".%s.tmp-%ld-%u", link_path, (long)getpid(),
+                              attempt);
+        if (length < 0 || (size_t)length >= sizeof(temporary_path)) {
+            errno = ENAMETOOLONG;
+            return false;
+        }
+        if (symlink(target_path, temporary_path) != 0) {
+            if (errno == EEXIST) continue;
+            return false;
+        }
+        if (rename(temporary_path, link_path) != 0) {
+            int saved_errno = errno;
+            unlink(temporary_path);
+            errno = saved_errno;
+            return false;
+        }
+        return true;
+    }
+    errno = EEXIST;
+    return false;
+}
+
+/* Close run outputs before publishing their latest-log links. */
+static int finish_run_logs(bool succeeded, const char *log_path,
+                           const char *jsonl_path) {
+    if (fclose(jsonl_file) != 0) succeeded = false;
+    jsonl_file = NULL;
+    if (fclose(log_file) != 0) succeeded = false;
+    log_file = NULL;
+
+    bool log_linked = replace_latest_log_link("log-latest.log", log_path);
+    int log_errno = errno;
+    bool jsonl_linked =
+        replace_latest_log_link("log-latest.jsonl", jsonl_path);
+    int jsonl_errno = errno;
+    if (!log_linked) {
+        fprintf(stderr, "te-stsuite: cannot update log-latest.log: %s\n",
+                strerror(log_errno));
+        succeeded = false;
+    }
+    if (!jsonl_linked) {
+        fprintf(stderr, "te-stsuite: cannot update log-latest.jsonl: %s\n",
+                strerror(jsonl_errno));
+        succeeded = false;
+    }
+    return succeeded ? 0 : 1;
+}
+
 /* Run configured terminals sequentially and write both per-terminal and final views. */
 int controller_run(const AppConfig *config, const RunSelection *selection,
                    const char *executable_path) {
@@ -1598,11 +1652,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         jsonl_write_end(false);
         report_styled(color_dim, "\nLogs written\n  Text   %s\n  JSONL  %s\n",
                       log_path, jsonl_path);
-        fclose(jsonl_file);
-        jsonl_file = NULL;
-        fclose(log_file);
-        log_file = NULL;
-        return 1;
+        return finish_run_logs(false, log_path, jsonl_path);
     }
 
     report_styled(color_bold_cyan, "Process isolation checks\n");
@@ -1648,11 +1698,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                       log_path, jsonl_path);
         free(check_results);
         free(summaries.items);
-        fclose(jsonl_file);
-        jsonl_file = NULL;
-        fclose(log_file);
-        log_file = NULL;
-        return 1;
+        return finish_run_logs(false, log_path, jsonl_path);
     }
 
     bool all_ok = true;
@@ -1719,9 +1765,5 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
 
     free(check_results);
     free(summaries.items);
-    if (fclose(jsonl_file) != 0) all_ok = false;
-    jsonl_file = NULL;
-    if (fclose(log_file) != 0) all_ok = false;
-    log_file = NULL;
-    return all_ok ? 0 : 1;
+    return finish_run_logs(all_ok, log_path, jsonl_path);
 }

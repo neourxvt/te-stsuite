@@ -2,5 +2,7 @@
 /cvtebench-*.log
 /cvtebench-*.jsonl
 /.log.te-stsuite-*
+/log-latest.log
+/log-latest.jsonl
 /te-stsuite-*.log
 /te-stsuite-*.jsonl
