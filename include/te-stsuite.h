@@ -42,6 +42,9 @@ typedef struct {
     unsigned warmup;
     unsigned max_seconds;
     unsigned max_samples;
+    /* Startup calibration targets measured duration and number of launches. */
+    unsigned startup_min_seconds;
+    unsigned startup_min_samples;
     unsigned startup_timeout_seconds;
 } RunOptions;
 
@@ -66,6 +69,7 @@ typedef struct {
 typedef enum {
     WORKER_PHASE_CHECK,
     WORKER_PHASE_WARMUP,
+    WORKER_PHASE_STARTUP,
     WORKER_PHASE_BENCHMARK,
 } WorkerPhase;
 

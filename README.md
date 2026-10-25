@@ -38,6 +38,8 @@ min_bytes = 1048576
 warmup = 1
 max_seconds = 10
 max_samples = 0
+startup_min_seconds = 3
+startup_min_samples = 10
 startup_timeout_seconds = 30
 monitor = "cgroupv2"
 
@@ -111,11 +113,15 @@ startup and workload result has its own interval. If cgroup delegation is not
 available, the check says so and cgroup resource values are recorded as null;
 te-stsuite does not turn missing counters into zero or silently switch backends.
 
-The startup result measures time from launching the configured command until
-the in-terminal worker is ready. Each later result measures PTY writes after
-the separate warmup phase. The printed wall time covers the measured workload;
-the write average, 90th percentile, and standard deviation cover payload writes
-and exclude the per-sample reset and setup bytes.
+The startup benchmark launches the configured terminal repeatedly and measures
+from each launch until the in-terminal worker is ready. It gathers at least ten
+samples and at least three seconds of measured startup time by default. The
+startup result reports the mean wall time, 90th percentile, and standard
+deviation across those launches. `max_samples` can cap the startup sample count
+as well as workload samples. Each later result measures PTY writes after the
+separate warmup phase. The printed workload wall time covers all measured
+writes; the write average, 90th percentile, and standard deviation cover
+payload writes and exclude the per-sample reset and setup bytes.
 
 The report is printed after every benchmark and as a collective summary after
 all terminals finish. Matching logs are created in the current working
@@ -133,14 +139,17 @@ partial results are marked with `"complete":false`.
 ```jsonl
 {"type":"run","schema":2,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2"}
 {"type":"cgroup_check","terminal":"kitty/compact","status":"inside","worker_moved":true,"detail":"terminal and worker are in separate cgroups"}
-{"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"resources_available":true,"samples":1,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608}
+{"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
 {"type":"end","status":"ok","results":1}
 ```
 
 Configuration options default to 1 MiB minimum payloads, one warmup pass per
 workload, ten seconds per measured workload, unlimited samples within that
-time, and a 30 second startup timeout. `max_samples` can cap the sample count;
-it does not extend `max_seconds`.
+time, ten startup samples over at least three seconds, and a 30 second timeout
+for each terminal launch. The startup `wall_s` and `startup_avg_ms` fields are
+the mean of the startup samples; `startup_p90_ms` and `startup_sd_ms` report
+their 90th percentile and sample standard deviation. `max_samples` can cap
+sample counts; it does not extend `max_seconds`.
 
 ## Workloads
 

@@ -2,6 +2,8 @@ min_bytes = 1048576
 warmup = 1
 max_seconds = 10
 max_samples = 0
+startup_min_seconds = 3
+startup_min_samples = 10
 startup_timeout_seconds = 30
 monitor = "cgroupv2"
 

@@ -139,7 +139,9 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
         close(socket_fd);
         return 1;
     }
-    if (selection != NULL && selection->phase == WORKER_PHASE_CHECK) {
+    if (selection != NULL &&
+        (selection->phase == WORKER_PHASE_CHECK ||
+         selection->phase == WORKER_PHASE_STARTUP)) {
         send_event(socket_fd, "D\n");
         close(socket_fd);
         return 0;

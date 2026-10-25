@@ -134,6 +134,8 @@ int main(int argc, char **argv) {
                 worker_phase = WORKER_PHASE_CHECK;
             } else if (strcmp(argv[i], "warmup") == 0) {
                 worker_phase = WORKER_PHASE_WARMUP;
+            } else if (strcmp(argv[i], "startup") == 0) {
+                worker_phase = WORKER_PHASE_STARTUP;
             } else if (strcmp(argv[i], "benchmark") == 0) {
                 worker_phase = WORKER_PHASE_BENCHMARK;
             } else {

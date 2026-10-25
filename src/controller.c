@@ -36,6 +36,12 @@ typedef struct {
     bool complete;
 } Summary;
 
+/* One independently launched terminal sample for the startup benchmark. */
+typedef struct {
+    uint64_t duration_ns;
+    MonitorMetrics metrics;
+} StartupSample;
+
 typedef struct {
     Summary *items;
     size_t count;
@@ -355,7 +361,9 @@ static char **expand_command(const TerminalConfig *terminal,
                                         ? "check"
                                         : phase == WORKER_PHASE_WARMUP
                                               ? "warmup"
-                                              : "benchmark");
+                                              : phase == WORKER_PHASE_STARTUP
+                                                    ? "startup"
+                                                    : "benchmark");
             argv[output++] = strdup("--worker-cgroup");
             argv[output++] = strdup(worker_cgroup_path);
         }
@@ -468,6 +476,11 @@ static void print_summary(const Summary *summary) {
                       "    PTY write  avg %9.2f ms   p90 %9.2f ms   sd %9.2f ms   payload %zu B/sample\n",
                       summary->sample_mean_ms, summary->sample_p90_ms,
                       summary->sample_stddev_ms, summary->bytes);
+    } else if (strcmp(summary->benchmark, "startup") == 0) {
+        report_styled(color_dim,
+                      "    Startup    avg %9.2f ms   p90 %9.2f ms   sd %9.2f ms\n",
+                      summary->sample_mean_ms, summary->sample_p90_ms,
+                      summary->sample_stddev_ms);
     }
     if (!summary->complete) {
         report_styled(color_yellow,
@@ -504,8 +517,12 @@ static void print_collective_summary(const SummaryList *summaries) {
     size_t terminal_width = summary_column_width(summaries, true);
     size_t benchmark_width = summary_column_width(summaries, false);
     bool has_write_results = false;
+    bool has_startup_results = false;
     for (size_t i = 0; i < summaries->count; ++i) {
         if (summaries->items[i].bytes > 0) has_write_results = true;
+        if (strcmp(summaries->items[i].benchmark, "startup") == 0) {
+            has_startup_results = true;
+        }
     }
 
     report_styled(color_bold_cyan, "Collective results\n");
@@ -542,6 +559,29 @@ static void print_collective_summary(const SummaryList *summaries) {
                           summary->metrics.wall_seconds * 1000.0, "n/a", "n/a",
                           "n/a", "n/a", summary->samples,
                           summary->complete ? "complete" : "partial");
+        }
+    }
+
+    if (has_startup_results) {
+        report("\n");
+        report_styled(color_bold_cyan, "Startup results\n");
+        size_t startup_width = terminal_width + benchmark_width + 2 * 6 + 12 +
+                               12 + 12 + 9;
+        report_styled(color_bold_cyan,
+                      "%-*s  %-*s  %12s  %12s  %12s  %9s\n",
+                      (int)terminal_width, "Terminal",
+                      (int)benchmark_width, "Benchmark", "Avg ms", "P90 ms",
+                      "SD ms", "Samples");
+        print_table_rule(startup_width);
+        for (size_t i = 0; i < summaries->count; ++i) {
+            const Summary *summary = &summaries->items[i];
+            if (strcmp(summary->benchmark, "startup") != 0) continue;
+            report_styled(summary->complete ? color_green : color_yellow,
+                          "%-*s  %-*s  %12.2f  %12.2f  %12.2f  %9u\n",
+                          (int)terminal_width, summary->terminal,
+                          (int)benchmark_width, summary->benchmark,
+                          summary->sample_mean_ms, summary->sample_p90_ms,
+                          summary->sample_stddev_ms, summary->samples);
         }
     }
 
@@ -677,6 +717,13 @@ static void jsonl_write_result(const Summary *summary) {
              yyjson_mut_obj_add_real(doc, object, "write_p90_ms",
                                      summary->sample_p90_ms) &&
              yyjson_mut_obj_add_real(doc, object, "write_sd_ms",
+                                     summary->sample_stddev_ms);
+    } else if (ok && strcmp(summary->benchmark, "startup") == 0) {
+        ok = yyjson_mut_obj_add_real(doc, object, "startup_avg_ms",
+                                     summary->sample_mean_ms) &&
+             yyjson_mut_obj_add_real(doc, object, "startup_p90_ms",
+                                     summary->sample_p90_ms) &&
+             yyjson_mut_obj_add_real(doc, object, "startup_sd_ms",
                                      summary->sample_stddev_ms);
     }
     if (!ok) {
@@ -902,7 +949,8 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                          bool *active, bool *ready, bool *done,
                          bool *worker_failed, bool include_startup,
                          CgroupCheckResult *check_result, WorkerPhase phase,
-                         uint64_t launch_ns) {
+                         uint64_t launch_ns,
+                         StartupSample *startup_sample) {
     if (line[0] == 'R' && line[1] == ' ') {
         long worker_pid = 0;
         long terminal_pid = 0;
@@ -936,7 +984,14 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                               detail == NULL ? monitor_scope_error(monitor) : detail);
             }
         }
-        if (phase == WORKER_PHASE_BENCHMARK && include_startup) {
+        if (phase == WORKER_PHASE_STARTUP) {
+            if (startup_sample == NULL) return false;
+            uint64_t ready_ns = monotonic_now_ns();
+            startup_sample->metrics = monitor_end(monitor, ready_ns);
+            startup_sample->duration_ns = ready_ns >= launch_ns
+                                              ? ready_ns - launch_ns
+                                              : 0;
+        } else if (phase == WORKER_PHASE_BENCHMARK && include_startup) {
             MonitorMetrics metrics = monitor_end(monitor, monotonic_now_ns());
             Summary summary = {0};
             snprintf(summary.terminal, sizeof(summary.terminal), "%s",
@@ -954,7 +1009,6 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         if (phase == WORKER_PHASE_BENCHMARK && include_startup) {
             print_summary(&summaries->items[summaries->count - 1]);
         }
-        (void)launch_ns;
         *ready = true;
         return true;
     }
@@ -1015,7 +1069,12 @@ static bool run_terminal(const TerminalConfig *terminal,
                         const char *executable_path,
                         WorkerPhase phase,
                         SummaryList *summaries,
-                        CgroupCheckResult *check_result) {
+                        CgroupCheckResult *check_result,
+                        bool include_startup,
+                        StartupSample *startup_sample) {
+    if (startup_sample != NULL) {
+        memset(startup_sample, 0, sizeof(*startup_sample));
+    }
     char socket_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
     int listener = open_control_socket(socket_path, sizeof(socket_path));
     if (listener < 0) {
@@ -1238,10 +1297,9 @@ static bool run_terminal(const TerminalConfig *terminal,
                                                 active_benchmark, &active_bytes,
                                                 &active, &ready, &done,
                                                 &worker_failed,
-                                                selection_includes_benchmark(
-                                                    selection, "startup"),
+                                                include_startup,
                                                 check_result, phase,
-                                                launch_ns);
+                                                launch_ns, startup_sample);
                     consumed = i + 1;
                     if (!handled && !done) {
                         report_styled(color_red,
@@ -1285,6 +1343,130 @@ static bool run_terminal(const TerminalConfig *terminal,
     return ready && done && !worker_failed &&
            (phase != WORKER_PHASE_CHECK ||
             (check_result != NULL && check_result->passed));
+}
+
+/* Order independent startup durations for percentile calculations. */
+static int compare_startup_duration(const void *left, const void *right) {
+    uint64_t a = *(const uint64_t *)left;
+    uint64_t b = *(const uint64_t *)right;
+    return (a > b) - (a < b);
+}
+
+/* Launch until startup has enough samples and enough measured wall time. */
+static bool run_startup_benchmark(const TerminalConfig *terminal,
+                                 const AppConfig *config,
+                                 const RunSelection *selection,
+                                 const char *executable_path,
+                                 SummaryList *summaries) {
+    uint64_t *durations = NULL;
+    size_t capacity = 0;
+    unsigned samples = 0;
+    uint64_t total_duration_ns = 0;
+    double total_cpu_seconds = 0;
+    long double memory_integral = 0;
+    uint64_t peak_memory_bytes = 0;
+    bool resources_available = true;
+    bool complete = false;
+    bool ok = true;
+    uint64_t target_duration_ns =
+        (uint64_t)config->options.startup_min_seconds * 1000000000ULL;
+
+    while (!complete) {
+        if (samples == capacity) {
+            size_t next_capacity = capacity == 0 ? 16 : capacity * 2;
+            if (next_capacity < capacity ||
+                next_capacity > SIZE_MAX / sizeof(*durations)) {
+                report_styled(color_red,
+                              "  Error: too many startup samples to store\n");
+                ok = false;
+                break;
+            }
+            uint64_t *next = realloc(durations,
+                                     next_capacity * sizeof(*durations));
+            if (next == NULL) {
+                report_styled(color_red,
+                              "  Error: out of memory collecting startup samples\n");
+                ok = false;
+                break;
+            }
+            durations = next;
+            capacity = next_capacity;
+        }
+
+        report_styled(color_dim, "  Startup sample %u\n", samples + 1);
+        StartupSample sample;
+        if (!run_terminal(terminal, config, selection, executable_path,
+                          WORKER_PHASE_STARTUP, summaries, NULL, false,
+                          &sample)) {
+            ok = false;
+            break;
+        }
+
+        durations[samples++] = sample.duration_ns;
+        total_duration_ns = sample.duration_ns > UINT64_MAX - total_duration_ns
+                                ? UINT64_MAX
+                                : total_duration_ns + sample.duration_ns;
+        resources_available = resources_available &&
+                              sample.metrics.resources_available;
+        total_cpu_seconds += sample.metrics.cpu_seconds;
+        memory_integral += (long double)sample.metrics.average_memory_bytes *
+                           sample.metrics.wall_seconds;
+        if (sample.metrics.peak_memory_bytes > peak_memory_bytes) {
+            peak_memory_bytes = sample.metrics.peak_memory_bytes;
+        }
+
+        bool enough_samples = samples >= config->options.startup_min_samples;
+        bool enough_time = total_duration_ns >= target_duration_ns;
+        bool sample_limit = config->options.max_samples > 0 &&
+                            samples >= config->options.max_samples;
+        complete = (enough_samples && enough_time) || sample_limit;
+    }
+
+    if (samples > 0) {
+        qsort(durations, samples, sizeof(*durations),
+              compare_startup_duration);
+        long double sum = 0;
+        for (unsigned i = 0; i < samples; ++i) sum += durations[i];
+        long double mean = sum / samples;
+        long double variance = 0;
+        if (samples > 1) {
+            for (unsigned i = 0; i < samples; ++i) {
+                long double delta = (long double)durations[i] - mean;
+                variance += delta * delta;
+            }
+            variance /= samples - 1;
+        }
+        size_t percentile_index = ((size_t)samples * 90 + 99) / 100 - 1;
+        Summary summary = {0};
+        snprintf(summary.terminal, sizeof(summary.terminal), "%s",
+                 terminal->name);
+        snprintf(summary.benchmark, sizeof(summary.benchmark), "startup");
+        summary.samples = samples;
+        summary.sample_mean_ms = (double)(mean / 1000000.0L);
+        summary.sample_p90_ms = (double)durations[percentile_index] / 1000000.0;
+        summary.sample_stddev_ms = (double)(sqrtl(variance) / 1000000.0L);
+        summary.metrics.resources_available = resources_available;
+        summary.metrics.wall_seconds = (double)(mean / 1000000000.0L);
+        summary.metrics.cpu_seconds = total_cpu_seconds / samples;
+        summary.metrics.average_memory_bytes = total_duration_ns > 0
+                                                   ? (double)(memory_integral /
+                                                              ((long double)total_duration_ns /
+                                                               1000000000.0L))
+                                                   : 0;
+        summary.metrics.peak_memory_bytes = peak_memory_bytes;
+        summary.complete = complete;
+        if (!summary_push(summaries, &summary)) {
+            report_styled(color_red,
+                          "  Error: cannot store the startup summary\n");
+            ok = false;
+        } else {
+            jsonl_write_result(&summaries->items[summaries->count - 1]);
+            print_summary(&summaries->items[summaries->count - 1]);
+        }
+    }
+
+    free(durations);
+    return ok && complete;
 }
 
 /* Run configured terminals sequentially and write both per-terminal and final views. */
@@ -1353,7 +1535,7 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
                       selected_terminal_count, config->terminals[i].name);
         bool ok = run_terminal(&config->terminals[i], config, selection,
                                executable_path, WORKER_PHASE_CHECK,
-                               &summaries, result);
+                               &summaries, result, false, NULL);
         if (!result->recorded) {
             snprintf(result->detail, sizeof(result->detail),
                      "check did not complete; see the terminal error above");
@@ -1389,6 +1571,8 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
 
     bool all_ok = true;
     size_t benchmark_count = selected_benchmark_count(selection);
+    bool startup_selected = selection_includes_benchmark(selection, "startup");
+    size_t workload_count = benchmark_count - (startup_selected ? 1 : 0);
     if (benchmark_count == 0) {
         report_styled(color_bold_cyan,
                       "No benchmarks selected; skipping warmup and measurement.\n");
@@ -1407,23 +1591,35 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
             bool warmup_ok = run_terminal(&config->terminals[i], config,
                                           selection, executable_path,
                                           WORKER_PHASE_WARMUP, &summaries,
-                                          NULL);
+                                          NULL, false, NULL);
             if (!warmup_ok) all_ok = false;
             report_styled(warmup_ok ? color_green : color_red,
                           "  %s: Warmup\n", warmup_ok ? "Finished" : "Failed");
 
-            report_styled(color_dim, "  Benchmarks\n");
-            size_t before = summaries.count;
-            bool benchmark_ok = run_terminal(&config->terminals[i], config,
-                                             selection, executable_path,
-                                             WORKER_PHASE_BENCHMARK,
-                                             &summaries, NULL);
-            if (!benchmark_ok) all_ok = false;
-            size_t collected = summaries.count - before;
-            report_styled(benchmark_ok ? color_green : color_red,
-                          "  %s: %zu benchmark result%s\n",
-                          benchmark_ok ? "Finished" : "Failed", collected,
-                          collected == 1 ? "" : "s");
+            if (startup_selected) {
+                report_styled(color_dim, "  Startup benchmark\n");
+                bool startup_ok = run_startup_benchmark(
+                    &config->terminals[i], config, selection,
+                    executable_path, &summaries);
+                if (!startup_ok) all_ok = false;
+                report_styled(startup_ok ? color_green : color_red,
+                              "  %s: Startup benchmark\n",
+                              startup_ok ? "Finished" : "Failed");
+            }
+
+            if (workload_count > 0) {
+                report_styled(color_dim, "  Benchmarks\n");
+                size_t before = summaries.count;
+                bool benchmark_ok = run_terminal(
+                    &config->terminals[i], config, selection, executable_path,
+                    WORKER_PHASE_BENCHMARK, &summaries, NULL, false, NULL);
+                if (!benchmark_ok) all_ok = false;
+                size_t collected = summaries.count - before;
+                report_styled(benchmark_ok ? color_green : color_red,
+                              "  %s: %zu benchmark result%s\n",
+                              benchmark_ok ? "Finished" : "Failed", collected,
+                              collected == 1 ? "" : "s");
+            }
         }
         report_styled(NULL, "\n");
     }

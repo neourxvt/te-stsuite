@@ -113,6 +113,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
     config->options.warmup = 1;
     config->options.max_seconds = 10;
     config->options.max_samples = 0;
+    config->options.startup_min_seconds = 3;
+    config->options.startup_min_samples = 10;
     config->options.startup_timeout_seconds = 30;
     config->monitor_backend = MONITOR_BACKEND_CGROUPV2;
 
@@ -135,6 +137,10 @@ bool config_load(const char *path, AppConfig *config, char *error,
     unsigned long long warmup = config->options.warmup;
     unsigned long long max_seconds = config->options.max_seconds;
     unsigned long long max_samples = config->options.max_samples;
+    unsigned long long startup_min_seconds =
+        config->options.startup_min_seconds;
+    unsigned long long startup_min_samples =
+        config->options.startup_min_samples;
     unsigned long long startup_timeout = config->options.startup_timeout_seconds;
     toml_datum_t monitor_name = toml_get(result.toptab, "monitor");
     if (monitor_name.type != TOML_UNKNOWN) {
@@ -158,11 +164,17 @@ bool config_load(const char *path, AppConfig *config, char *error,
                              error, error_size) &&
                  read_option(result.toptab, "max_samples", UINT_MAX, &max_samples,
                              error, error_size) &&
+                 read_option(result.toptab, "startup_min_seconds", UINT_MAX,
+                             &startup_min_seconds, error, error_size) &&
+                 read_option(result.toptab, "startup_min_samples", UINT_MAX,
+                             &startup_min_samples, error, error_size) &&
                  read_option(result.toptab, "startup_timeout_seconds", UINT_MAX,
                              &startup_timeout, error, error_size);
-    if (valid && (min_bytes == 0 || max_seconds == 0 || startup_timeout == 0)) {
+    if (valid && (min_bytes == 0 || max_seconds == 0 ||
+                  startup_min_seconds == 0 || startup_min_samples == 0 ||
+                  startup_timeout == 0)) {
         snprintf(error, error_size,
-                 "min_bytes, max_seconds, and startup_timeout_seconds must be positive");
+                 "min_bytes, max_seconds, startup_min_seconds, startup_min_samples, and startup_timeout_seconds must be positive");
         valid = false;
     }
     if (!valid) {
@@ -174,6 +186,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
     config->options.warmup = (unsigned)warmup;
     config->options.max_seconds = (unsigned)max_seconds;
     config->options.max_samples = (unsigned)max_samples;
+    config->options.startup_min_seconds = (unsigned)startup_min_seconds;
+    config->options.startup_min_samples = (unsigned)startup_min_samples;
     config->options.startup_timeout_seconds = (unsigned)startup_timeout;
 
     bool parsed_terminals = false;
