@@ -852,8 +852,9 @@ static void summary_metric_color(const SummaryList *summaries,
                     } else if (value >= red_threshold) {
                         index = palette[last];
                     } else {
+                        /* Below-median values use only the green-to-yellow half. */
                         double position = value < median
-                                              ? (value - minimum) / (median - minimum)
+                                              ? 0.5 * (value - minimum) / (median - minimum)
                                               : 0.5 + 0.5 * (value - median) /
                                                     (red_threshold - median);
                         index = palette[(size_t)(position * last + 0.5)];
