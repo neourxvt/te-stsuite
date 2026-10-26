@@ -245,8 +245,8 @@ cmd = "xterm -e {CMD}"
 "*.color21" = "{BASE06}"
 
 [ghostty]
-# Ghostty requires --config-file=PATH, so join the standalone {CFG} in a shell.
-cmd = '''sh -c 'ghostty_config=$1; shift; exec ghostty --config-default-files=false --config-file="$ghostty_config" -e "$@"' sh {CFG} {CMD}'''
+# Keep Ghostty's user config from changing the benchmark's terminal setup.
+cmd = "ghostty --config-default-files=false --config-file={CFG} -e {CMD}"
 
 [ghostty.configs]
 standard = """

@@ -533,6 +533,31 @@ static void string_list_free(StringList *list) {
     memset(list, 0, sizeof(*list));
 }
 
+/* Keep a generated config path inside its argument while expanding {CFG}. */
+static char *expand_config_argument(const char *word, const char *config_path) {
+    static const char placeholder[] = "{CFG}";
+    const char *match = strstr(word, placeholder);
+    if (match == NULL) return strdup(word);
+
+    size_t prefix_length = (size_t)(match - word);
+    size_t path_length = strlen(config_path);
+    size_t suffix_length = strlen(match + sizeof(placeholder) - 1);
+    if (path_length > SIZE_MAX - prefix_length) return NULL;
+    size_t expanded_length = prefix_length + path_length;
+    if (suffix_length > SIZE_MAX - expanded_length) return NULL;
+    expanded_length += suffix_length;
+    if (expanded_length == SIZE_MAX) return NULL;
+
+    char *expanded = malloc(expanded_length + 1);
+    if (expanded == NULL) return NULL;
+    memcpy(expanded, word, prefix_length);
+    memcpy(expanded + prefix_length, config_path, path_length);
+    memcpy(expanded + prefix_length + path_length,
+           match + sizeof(placeholder) - 1, suffix_length);
+    expanded[expanded_length] = '\0';
+    return expanded;
+}
+
 /* Build argv by replacing worker and optional temporary-config placeholders. */
 static char **expand_command(const TerminalConfig *terminal,
                              const AppConfig *config,
@@ -560,13 +585,10 @@ static char **expand_command(const TerminalConfig *terminal,
             string_list_free(&words);
             return NULL;
         }
-        if (strcmp(words.items[i], "{CFG}") == 0) ++config_placeholders;
-        else if (strstr(words.items[i], "{CFG}") != NULL) {
-            snprintf(error, error_size,
-                     "{CFG} must be a standalone word in terminal command '%s'",
-                     terminal->name);
-            string_list_free(&words);
-            return NULL;
+        const char *cursor = words.items[i];
+        while ((cursor = strstr(cursor, "{CFG}")) != NULL) {
+            ++config_placeholders;
+            cursor += sizeof("{CFG}") - 1;
         }
     }
     if (command_placeholders != 1) {
@@ -586,7 +608,7 @@ static char **expand_command(const TerminalConfig *terminal,
          (config_placeholders > 1 || (!env_config && config_placeholders != 1))) ||
         (terminal->inline_config == NULL && config_placeholders != 0)) {
         snprintf(error, error_size,
-                 "terminal '%s' configs require one {CFG} command word or a {CFG}/{CFG_DIR} env value; commands without configs must not contain {CFG}",
+                 "terminal '%s' configs require one {CFG} command reference or a {CFG}/{CFG_DIR} env value; commands without configs must not contain {CFG}",
                  terminal->name);
         string_list_free(&words);
         return NULL;
@@ -602,11 +624,7 @@ static char **expand_command(const TerminalConfig *terminal,
     }
     size_t output = 0;
     for (size_t i = 0; i < words.count; ++i) {
-        if (strcmp(words.items[i], "{CFG}") == 0) {
-            argv[output++] = strdup(config_path);
-        } else if (strcmp(words.items[i], "{CMD}") != 0) {
-            argv[output++] = strdup(words.items[i]);
-        } else {
+        if (strcmp(words.items[i], "{CMD}") == 0) {
             argv[output++] = strdup(executable_path);
             argv[output++] = strdup(config->path);
             argv[output++] = strdup("--run");
@@ -622,6 +640,9 @@ static char **expand_command(const TerminalConfig *terminal,
                                                     : "benchmark");
             argv[output++] = strdup("--worker-cgroup");
             argv[output++] = strdup(worker_cgroup_path);
+        } else {
+            argv[output++] = expand_config_argument(words.items[i],
+                                                     config_path);
         }
     }
     for (size_t i = 0; i < selected_count; ++i) {

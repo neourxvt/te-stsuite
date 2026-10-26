@@ -123,8 +123,9 @@ worker control pipe option. A terminal can define multiple inline configuration
 variants under `[kitty.configs]`, with each key naming a variant and its
 multiline string supplying the content. Each variant is run separately; its
 content is written to `config.toml` in a private temporary directory and the
-standalone `{CFG}` command word is replaced with that file's path. A terminal
-can instead pass the path through its `env` table. Values equal to `{CFG}` or
+`{CFG}` command reference is replaced with that file's path, either as a whole
+argument or embedded in one, such as `--config-file={CFG}`. A terminal can
+instead pass the path through its `env` table. Values equal to `{CFG}` or
 `{CFG_DIR}` receive the config file or directory path; other strings are passed
 literally. For example, Rio can use `cmd = "rio -e {CMD}"` with
 `RIO_CONFIG_HOME = "{CFG_DIR}"` under `[rio.env]`. Config references require
