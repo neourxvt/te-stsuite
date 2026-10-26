@@ -33,6 +33,9 @@ typedef struct {
     double sample_stddev_ms;
     MonitorMetrics metrics;
     bool resources_collected;
+    bool has_cell_dimensions;
+    unsigned cell_width_px;
+    unsigned cell_height_px;
     bool complete;
 } Summary;
 
@@ -784,6 +787,10 @@ static void print_summary(const Summary *summary) {
                           summary->samples);
         }
     }
+    if (summary->has_cell_dimensions) {
+        report_styled(color_dim, "    Cell dimensions %u x %u px\n",
+                      summary->cell_width_px, summary->cell_height_px);
+    }
     if (summary->bytes > 0) {
         report_styled(color_dim,
                       "    PTY write  avg %9.2f ms   p90 %9.2f ms   sd %9.2f ms   payload %zu B/sample\n",
@@ -999,8 +1006,10 @@ static void print_collective_summary(const SummaryList *summaries) {
     bool has_startup_results = false;
     bool has_latency_results = false;
     bool has_resource_results = false;
+    bool has_cell_dimension_results = false;
     for (size_t i = 0; i < summaries->count; ++i) {
         if (summaries->items[i].resources_collected) has_resource_results = true;
+        if (summaries->items[i].has_cell_dimensions) has_cell_dimension_results = true;
         if (summaries->items[i].bytes > 0) has_write_results = true;
         if (benchmark_is_typometer(summaries->items[i].benchmark) &&
             summaries->items[i].samples > 0) has_latency_results = true;
@@ -1035,6 +1044,24 @@ static void print_collective_summary(const SummaryList *summaries) {
             print_summary_metric(summaries, summary, SUMMARY_SAMPLES, 7);
             report_styled(summary->complete ? color_green : color_yellow,
                           "  %9s\n", summary->complete ? "complete" : "partial");
+        }
+    }
+
+    if (has_cell_dimension_results) {
+        report("\n");
+        report_styled(color_bold_cyan, "Cell dimensions\n");
+        report_styled(color_bold_cyan,
+                      "%-*s  %-*s  %12s  %12s\n",
+                      (int)terminal_width, "Terminal", (int)benchmark_width,
+                      "Benchmark", "Width px", "Height px");
+        print_table_rule(terminal_width + benchmark_width + 2 * 6 + 2 * 12);
+        for (size_t i = 0; i < summaries->count; ++i) {
+            const Summary *summary = &summaries->items[i];
+            if (!summary->has_cell_dimensions) continue;
+            report("%-*s  %-*s  %12u  %12u\n",
+                   (int)terminal_width, summary->terminal,
+                   (int)benchmark_width, summary->benchmark,
+                   summary->cell_width_px, summary->cell_height_px);
         }
     }
 
@@ -1150,7 +1177,7 @@ static void jsonl_write_run(const AppConfig *config, const char *started_at) {
     yyjson_mut_doc *doc = jsonl_new_object(&object);
     if (doc == NULL) return;
     bool ok = yyjson_mut_obj_add_str(doc, object, "type", "run") &&
-              yyjson_mut_obj_add_uint(doc, object, "schema", 7) &&
+              yyjson_mut_obj_add_uint(doc, object, "schema", 8) &&
               yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
               yyjson_mut_obj_add_str(doc, object, "config", config->path) &&
               yyjson_mut_obj_add_str(doc, object, "monitor",
@@ -1207,6 +1234,12 @@ static void jsonl_write_result(const Summary *summary) {
              yyjson_mut_obj_add_null(doc, object, "cpu_pct") &&
              yyjson_mut_obj_add_null(doc, object, "mem_avg_bytes") &&
              yyjson_mut_obj_add_null(doc, object, "mem_peak_bytes");
+    }
+    if (ok && summary->has_cell_dimensions) {
+        ok = yyjson_mut_obj_add_uint(doc, object, "cell_width_px",
+                                     summary->cell_width_px) &&
+             yyjson_mut_obj_add_uint(doc, object, "cell_height_px",
+                                     summary->cell_height_px);
     }
     if (ok && summary->bytes > 0) {
         ok = yyjson_mut_obj_add_real(doc, object, "write_avg_ms",
@@ -1515,6 +1548,9 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
                          SummaryList *summaries,
                          char *active_benchmark, size_t *active_bytes,
                          bool *active, bool *active_resources,
+                         bool *active_has_cell_dimensions,
+                         unsigned *active_cell_width_px,
+                         unsigned *active_cell_height_px,
                          bool *monitor_running, bool *ready, bool *done,
                          bool *worker_failed, bool include_startup,
                          IsolationCheckResult *check_result, WorkerPhase phase,
@@ -1603,6 +1639,9 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         snprintf(active_benchmark, 128, "%s", name);
         *active_bytes = bytes;
         *active_resources = !run->benchmark->skip_resource_collection;
+        *active_has_cell_dimensions = false;
+        *active_cell_width_px = 0;
+        *active_cell_height_px = 0;
         *active = true;
         if (phase == WORKER_PHASE_BENCHMARK) {
             set_terminal_title(terminal->name, name);
@@ -1615,6 +1654,18 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
             monitor_end(monitor, monotonic_now_ns());
             *monitor_running = false;
         }
+        return true;
+    }
+    /* Attach optional cell geometry to the active benchmark result. */
+    if (line[0] == 'D' && line[1] == ' ') {
+        char name[128];
+        unsigned width_px = 0, height_px = 0;
+        if (sscanf(line + 2, "%127s %u %u", name, &width_px, &height_px) != 3 ||
+            !*active || *active_has_cell_dimensions || width_px == 0 ||
+            height_px == 0 || strcmp(name, active_benchmark) != 0) return false;
+        *active_has_cell_dimensions = true;
+        *active_cell_width_px = width_px;
+        *active_cell_height_px = height_px;
         return true;
     }
     if (line[0] == 'E' && line[1] == ' ') {
@@ -1635,6 +1686,9 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         summary.sample_p90_ms = p90_ms;
         summary.sample_stddev_ms = stddev_ms;
         summary.resources_collected = *active_resources;
+        summary.has_cell_dimensions = *active_has_cell_dimensions;
+        summary.cell_width_px = *active_cell_width_px;
+        summary.cell_height_px = *active_cell_height_px;
         if (*active_resources && *monitor_running) {
             summary.metrics = monitor_end(monitor, monotonic_now_ns());
             *monitor_running = false;
@@ -1645,6 +1699,7 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         print_summary(&summary);
         *active = false;
         *active_resources = false;
+        *active_has_cell_dimensions = false;
         active_benchmark[0] = '\0';
         return true;
     }
@@ -1973,6 +2028,9 @@ static bool run_terminal(const TerminalConfig *terminal,
     bool worker_failed = false;
     bool active = false;
     bool active_resources = false;
+    bool active_has_cell_dimensions = false;
+    unsigned active_cell_width_px = 0;
+    unsigned active_cell_height_px = 0;
     char active_benchmark[128] = {0};
     size_t active_bytes = 0;
     char input[2048];
@@ -2032,6 +2090,9 @@ static bool run_terminal(const TerminalConfig *terminal,
                                                 config, monitor, summaries,
                                                 active_benchmark, &active_bytes,
                                                 &active, &active_resources,
+                                                &active_has_cell_dimensions,
+                                                &active_cell_width_px,
+                                                &active_cell_height_px,
                                                 &monitor_running, &ready, &done,
                                                 &worker_failed,
                                                 include_startup,
@@ -2072,6 +2133,9 @@ static bool run_terminal(const TerminalConfig *terminal,
         summary.bytes = active_bytes;
         summary.metrics = partial;
         summary.resources_collected = active_resources;
+        summary.has_cell_dimensions = active_has_cell_dimensions;
+        summary.cell_width_px = active_cell_width_px;
+        summary.cell_height_px = active_cell_height_px;
         summary.complete = false;
         if (summary_push(summaries, &summary)) {
             jsonl_write_result(&summary);

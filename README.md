@@ -214,7 +214,7 @@ flat result record per measured terminal and benchmark, and one end record.
 Each warmup output record includes that terminal's captured stdout and stderr.
 Output from process isolation checks and startup samples is
 suppressed and is not recorded.
-Results are not duplicated for printed summaries. The schema version is 7.
+Results are not duplicated for printed summaries. The schema version is 8.
 Durations use seconds or milliseconds as named, memory uses
 bytes, and `cpu_pct` is percent of one core. Missing resource measurements are
 JSON null. Workload results also include payload size and write-time statistics;
@@ -227,9 +227,11 @@ interval collection. A benchmark can opt out with its
 When false, the wall, CPU, and memory fields are null,
 `resources_available` is null, and that result is omitted from the collective
 resource table. Process isolation checks still run for these benchmarks.
+The `cell_dimensions` result also records `cell_width_px` and
+`cell_height_px`.
 
 ```jsonl
-{"type":"run","schema":7,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
+{"type":"run","schema":8,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
 {"type":"process_isolation_check","terminal":"kitty/compact","status":"passed","cgroups_used":true,"worker_moved":true,"detail":"terminal isolated on CPU 2; worker is in its separate cgroup"}
 {"type":"warmup_output","terminal":"kitty/compact","stdout":"","stderr":""}
 {"type":"result","terminal":"kitty/compact","benchmark":"startup","resources_collected":true,"wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
@@ -255,7 +257,8 @@ without explicit newlines. The `termbench_fg_per_char` and
 `termbench_fgbg_per_char` workloads repaint the terminal grid with per-cell RGB
 foreground colors or RGB foreground and background colors. See
 [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for their source and adaptation details.
-The `typometer` typing latency benchmark runs after the PTY workloads.
+The `typometer` typing latency benchmark runs after the PTY workloads, followed
+by the `cell_dimensions` rendered-cell check.
 
 ## Typing latency
 
@@ -335,6 +338,20 @@ input settings are restored on completion, failure, and handled termination
 signals. A failed run does not report successful latency samples; its partial result
 uses null latency fields.
 
-The ported backend is licensed under Apache-2.0. See
+The ported Typometer backend is licensed under Apache-2.0. See
 [NOTICE.typometer](NOTICE.typometer) and
 [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt) for attribution and terms.
+
+## Cell dimensions
+
+The `cell_dimensions` benchmark writes one space with a truecolor red
+background, resets the background color, and captures the visible terminal
+window in memory. It measures the bounding box of reddish pixels and reports
+the cell width and height in pixels in the benchmark output and JSONL result.
+It does not save an image file or collect CPU, memory, or wall-time metrics.
+The benchmark requires a native X11 session with a visible, fully on-screen
+terminal window; it does not require XTEST.
+
+```sh
+./build/te-stsuite example.toml -t xterm -b cell_dimensions
+```

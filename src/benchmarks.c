@@ -29,6 +29,8 @@ int bench_termbench_fgbg_per_char_prepare(BenchData *, const BenchContext *, cha
 
 bool bench_typometer_execute(const BenchContext *, const RunOptions *, bool,
                               BenchBegin, void *, BenchSamples *, char *, size_t);
+bool bench_cell_dimensions_execute(const BenchContext *, const RunOptions *, bool,
+                                    BenchBegin, void *, BenchSamples *, char *, size_t);
 
 /* Keep the suite order stable and put terminal startup before PTY workloads. */
 const Benchmark te_stsuite_benchmarks[] = {
@@ -51,6 +53,7 @@ const Benchmark te_stsuite_benchmarks[] = {
     {"termbench_fg_per_char", bench_termbench_fg_per_char_prepare, NULL, false},
     {"termbench_fgbg_per_char", bench_termbench_fgbg_per_char_prepare, NULL, false},
     {"typometer", NULL, bench_typometer_execute, false},
+    {"cell_dimensions", NULL, bench_cell_dimensions_execute, true},
 };
 
 const size_t te_stsuite_benchmark_count =

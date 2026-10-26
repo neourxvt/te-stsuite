@@ -274,6 +274,12 @@ int worker_run(const AppConfig *config, const RunSelection *selection,
                 ok = benchmark->execute(&context, options, warmup,
                                          begin_active_benchmark, &active,
                                          &samples, error, sizeof(error));
+                /* Relay pixel measurements separately from timing samples. */
+                if (ok && !warmup && samples.has_cell_dimensions) {
+                    ok = send_event(control_fd, "D %s %u %u\n", run->name,
+                                    samples.cell_width_px,
+                                    samples.cell_height_px);
+                }
                 if (ok && !warmup) {
                     ok = report_samples(control_fd, run->name,
                                          samples.values, samples.count);

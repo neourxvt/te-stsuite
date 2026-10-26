@@ -48,10 +48,14 @@ typedef struct {
     bool typometer_asynchronous;
 } RunOptions;
 
-/* Active benchmarks return individual monotonic durations for shared summaries. */
+/* Active benchmarks return timing samples and optional measured properties. */
 typedef struct {
     uint64_t *values;
     unsigned count;
+    /* Pixel bounds can be reported independently of timing and resources. */
+    bool has_cell_dimensions;
+    unsigned cell_width_px;
+    unsigned cell_height_px;
 } BenchSamples;
 
 /* Begin resource accounting after calibration and before the actual workload. */

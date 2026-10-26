@@ -237,23 +237,27 @@ static bool wait_ms(Typometer *run, unsigned milliseconds) {
     }
 }
 
-/* Resolve period through the active XKB group, including Shift-only layouts. */
-static bool open_screen(Typometer *run) {
+/* Open the native TrueColor display used for rendered-pixel measurements. */
+static bool open_display(Typometer *run) {
     run->display = XOpenDisplay(NULL);
-    if (!run->display) return fail(run, "typometer requires a native X11 display (check DISPLAY)");
+    if (!run->display) return fail(run, "pixel measurement requires a native X11 display (check DISPLAY)");
     Display *display = run->display;
-    int event, error, major, minor;
-    if (!XTestQueryExtension(display, &event, &error, &major, &minor))
-        return fail(run, "X11 server does not support XTEST");
     int screen = DefaultScreen(display);
     if (DefaultVisual(display, screen)->class != TrueColor)
-        return fail(run, "typometer requires a TrueColor X11 visual");
+        return fail(run, "pixel measurement requires a TrueColor X11 visual");
     run->root = RootWindow(display, screen);
+    return true;
+}
+
+/* Locate this worker's terminal window and record its visible geometry. */
+static bool locate_terminal_window(Typometer *run) {
+    Display *display = run->display;
+    int screen = DefaultScreen(display);
     uint64_t until = monotonic_now_ns() + 3000000000ULL;
     do {
         run->target = find_target(display, run->root, 0);
         if (run->target) break;
-        if (interrupted) return fail(run, "latency measurement interrupted");
+        if (interrupted) return fail(run, "pixel measurement interrupted");
         sleep_ns(20000000ULL);
     } while (monotonic_now_ns() < until);
     if (!run->target) return fail(run, "cannot identify this terminal's X11 window using _NET_WM_PID");
@@ -275,6 +279,17 @@ static bool open_screen(Typometer *run) {
         run->left + run->width > DisplayWidth(display, screen) ||
         run->top + run->height > DisplayHeight(display, screen))
         return fail(run, "keep the entire terminal window on screen");
+    return true;
+}
+
+/* Resolve period through the active XKB group, including Shift-only layouts. */
+static bool open_screen(Typometer *run) {
+    if (!open_display(run)) return false;
+    Display *display = run->display;
+    int event, error, major, minor;
+    if (!XTestQueryExtension(display, &event, &error, &major, &minor))
+        return fail(run, "X11 server does not support XTEST");
+    if (!locate_terminal_window(run)) return false;
     XkbStateRec state;
     if (XkbGetState(display, XkbUseCoreKbd, &state) != Success)
         return fail(run, "cannot query XKB keyboard state");
@@ -738,5 +753,98 @@ bool bench_typometer_execute(const BenchContext *context, const RunOptions *opti
     XSetErrorHandler(old_xerror);
     while (installed) { --installed; sigaction(signals[installed], &previous[installed], NULL); }
     if (!ok && !error[0]) fail(&run, "latency measurement failed");
+    return ok;
+}
+
+/* Accept antialiased or palette-converted reds without requiring RGB equality. */
+static bool reddish_pixel(XImage *image, int x, int y) {
+    unsigned long value = XGetPixel(image, x, y);
+    unsigned red = channel(value, image->red_mask);
+    unsigned green = channel(value, image->green_mask);
+    unsigned blue = channel(value, image->blue_mask);
+    unsigned other = green > blue ? green : blue;
+    return red >= 64 && red > green + 16 && red > blue + 16 &&
+           red * 100 >= other * 115;
+}
+
+/* Bound the red cell while rejecting a terminal background that is itself red. */
+static bool locate_red_cell(Typometer *run, XImage *image, Rectangle *cell) {
+    int left = image->width, top = image->height, right = -1, bottom = -1;
+    size_t red_count = 0;
+    for (int y = 0; y < image->height; ++y) {
+        for (int x = 0; x < image->width; ++x) {
+            if (!reddish_pixel(image, x, y)) continue;
+            if (x < left) left = x;
+            if (x > right) right = x;
+            if (y < top) top = y;
+            if (y > bottom) bottom = y;
+            ++red_count;
+        }
+    }
+    if (right < left || bottom < top)
+        return fail(run, "no reddish terminal pixels appeared after typing the space");
+    int width = right - left + 1, height = bottom - top + 1;
+    size_t screen_pixels = (size_t)image->width * (size_t)image->height;
+    if (width >= image->width / 2 || height >= image->height / 2 ||
+        red_count > screen_pixels / 8)
+        return fail(run, "reddish pixels cover too much of the terminal to isolate one cell");
+    *cell = (Rectangle){left, top, width, height};
+    return true;
+}
+
+/* Draw one colored space, capture its rendered bounds, and restore the screen. */
+bool bench_cell_dimensions_execute(const BenchContext *context,
+                                    const RunOptions *options, bool warmup,
+                                    BenchBegin begin, void *user,
+                                    BenchSamples *samples, char *error,
+                                    size_t error_size) {
+    (void)context;
+    (void)options;
+    if (warmup) return true;
+    Typometer run = {.tty = -1, .error = error, .error_size = error_size};
+    atomic_init(&run.stop_echo, false);
+    atomic_init(&run.echo_failed, false);
+    atomic_store(&x11_failed, false);
+    interrupted = 0;
+    if (getenv("WAYLAND_DISPLAY") ||
+        (getenv("XDG_SESSION_TYPE") && !strcmp(getenv("XDG_SESSION_TYPE"), "wayland")))
+        return fail(&run, "cell_dimensions requires a native X11 session");
+    if (!XInitThreads()) return fail(&run, "cannot initialize Xlib threading");
+    int (*old_xerror)(Display *, XErrorEvent *) = XSetErrorHandler(x11_error);
+    bool ok = open_display(&run) && locate_terminal_window(&run);
+    bool wrote_test = false;
+    if (ok && !begin(user))
+        ok = fail(&run, "cannot start cell dimension measurement");
+    static const char test[] = "\033c\033[2J\033[H\033[?25l"
+                               "\033[48;2;255;0;0m \033[49m";
+    if (ok) {
+        wrote_test = true;
+        ok = write_bytes(STDOUT_FILENO, test, sizeof(test) - 1);
+        if (!ok) fail(&run, "cannot write the red backgrounded space");
+    }
+    Rectangle cell = {0};
+    if (ok) {
+        sleep_ns(100000000ULL);
+        XSync(run.display, False);
+        XImage *image = XGetImage(run.display, run.root, run.left, run.top,
+                                  (unsigned)run.width, (unsigned)run.height,
+                                  AllPlanes, ZPixmap);
+        if (image == NULL) {
+            ok = fail(&run, "cannot capture the terminal window pixels");
+        } else {
+            ok = locate_red_cell(&run, image, &cell);
+            XDestroyImage(image);
+        }
+    }
+    if (wrote_test && !write_bytes(STDOUT_FILENO, "\033c", 2))
+        ok = fail(&run, "cannot restore the terminal after cell measurement");
+    if (ok) {
+        samples->has_cell_dimensions = true;
+        samples->cell_width_px = (unsigned)cell.width;
+        samples->cell_height_px = (unsigned)cell.height;
+    }
+    if (run.display) XCloseDisplay(run.display);
+    XSetErrorHandler(old_xerror);
+    if (!ok && !error[0]) fail(&run, "cell dimension measurement failed");
     return ok;
 }
