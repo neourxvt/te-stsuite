@@ -32,6 +32,7 @@ typedef struct {
     double sample_p90_ms;
     double sample_stddev_ms;
     MonitorMetrics metrics;
+    bool resources_collected;
     bool complete;
 } Summary;
 
@@ -767,19 +768,21 @@ static void print_summary(const Summary *summary) {
     report_styled(summary->complete ? color_bold_cyan : color_yellow,
                   "  %s%s\n", summary->benchmark,
                   summary->complete ? "" : "  [PARTIAL]");
-    if (summary->metrics.resources_available) {
-        report_styled(result_color,
-                      "    Wall       %9.2f ms   CPU %8.2f%% (%9.2f ms)   Memory avg %8.2f MiB  peak %8.2f MiB   N %u\n",
-                      summary->metrics.wall_seconds * 1000.0, cpu_percent,
-                      summary->metrics.cpu_seconds * 1000.0,
-                      summary->metrics.average_memory_bytes / 1048576.0,
-                      (double)summary->metrics.peak_memory_bytes / 1048576.0,
-                      summary->samples);
-    } else {
-        report_styled(result_color,
-                      "    Wall       %9.2f ms   CPU      n/a (      n/a ms)   Memory avg      n/a  peak      n/a   N %u\n",
-                      summary->metrics.wall_seconds * 1000.0,
-                      summary->samples);
+    if (summary->resources_collected) {
+        if (summary->metrics.resources_available) {
+            report_styled(result_color,
+                          "    Wall       %9.2f ms   CPU %8.2f%% (%9.2f ms)   Memory avg %8.2f MiB  peak %8.2f MiB   N %u\n",
+                          summary->metrics.wall_seconds * 1000.0, cpu_percent,
+                          summary->metrics.cpu_seconds * 1000.0,
+                          summary->metrics.average_memory_bytes / 1048576.0,
+                          (double)summary->metrics.peak_memory_bytes / 1048576.0,
+                          summary->samples);
+        } else {
+            report_styled(result_color,
+                          "    Wall       %9.2f ms   CPU      n/a (      n/a ms)   Memory avg      n/a  peak      n/a   N %u\n",
+                          summary->metrics.wall_seconds * 1000.0,
+                          summary->samples);
+        }
     }
     if (summary->bytes > 0) {
         report_styled(color_dim,
@@ -846,6 +849,7 @@ typedef enum {
 static bool summary_metric_value(const Summary *summary, SummaryMetric metric,
                                  double *value) {
     const MonitorMetrics *metrics = &summary->metrics;
+    if (metric <= SUMMARY_WALL && !summary->resources_collected) return false;
     if (metric >= SUMMARY_CPU_PERCENT && metric <= SUMMARY_MEMORY_PEAK &&
         !metrics->resources_available) return false;
     switch (metric) {
@@ -994,7 +998,9 @@ static void print_collective_summary(const SummaryList *summaries) {
     bool has_write_results = false;
     bool has_startup_results = false;
     bool has_latency_results = false;
+    bool has_resource_results = false;
     for (size_t i = 0; i < summaries->count; ++i) {
+        if (summaries->items[i].resources_collected) has_resource_results = true;
         if (summaries->items[i].bytes > 0) has_write_results = true;
         if (benchmark_is_typometer(summaries->items[i].benchmark) &&
             summaries->items[i].samples > 0) has_latency_results = true;
@@ -1007,26 +1013,29 @@ static void print_collective_summary(const SummaryList *summaries) {
     report("Colors compare matching workloads within each column: green = better, red = worse.\n"
            "Values within 5% of the median stay yellow; colors shift to green/red by 25%.\n"
            "Lower is better; N/Samples are uncolored; gray = no spread, partial, or payload size.\n\n");
-    size_t resource_width = terminal_width + benchmark_width + 2 * 8 + 10 + 9 +
-                            10 + 15 + 15 + 7 + 9;
-    report_styled(color_bold_cyan,
-                  "%-*s  %-*s  %10s  %9s  %10s  %15s  %15s  %7s  %9s\n",
-                  (int)terminal_width, "Terminal", (int)benchmark_width,
-                  "Benchmark", "Wall ms", "CPU %", "CPU ms", "Memory avg MiB",
-                  "Memory peak MiB", "N", "Result");
-    print_table_rule(resource_width);
-    for (size_t i = 0; i < summaries->count; ++i) {
-        const Summary *summary = &summaries->items[i];
-        report("%-*s  %-*s", (int)terminal_width, summary->terminal,
-               (int)benchmark_width, summary->benchmark);
-        print_summary_metric(summaries, summary, SUMMARY_WALL, 10);
-        print_summary_metric(summaries, summary, SUMMARY_CPU_PERCENT, 9);
-        print_summary_metric(summaries, summary, SUMMARY_CPU_TIME, 10);
-        print_summary_metric(summaries, summary, SUMMARY_MEMORY_AVERAGE, 15);
-        print_summary_metric(summaries, summary, SUMMARY_MEMORY_PEAK, 15);
-        print_summary_metric(summaries, summary, SUMMARY_SAMPLES, 7);
-        report_styled(summary->complete ? color_green : color_yellow,
-                      "  %9s\n", summary->complete ? "complete" : "partial");
+    if (has_resource_results) {
+        size_t resource_width = terminal_width + benchmark_width + 2 * 8 + 10 + 9 +
+                                10 + 15 + 15 + 7 + 9;
+        report_styled(color_bold_cyan,
+                      "%-*s  %-*s  %10s  %9s  %10s  %15s  %15s  %7s  %9s\n",
+                      (int)terminal_width, "Terminal", (int)benchmark_width,
+                      "Benchmark", "Wall ms", "CPU %", "CPU ms", "Memory avg MiB",
+                      "Memory peak MiB", "N", "Result");
+        print_table_rule(resource_width);
+        for (size_t i = 0; i < summaries->count; ++i) {
+            const Summary *summary = &summaries->items[i];
+            if (!summary->resources_collected) continue;
+            report("%-*s  %-*s", (int)terminal_width, summary->terminal,
+                   (int)benchmark_width, summary->benchmark);
+            print_summary_metric(summaries, summary, SUMMARY_WALL, 10);
+            print_summary_metric(summaries, summary, SUMMARY_CPU_PERCENT, 9);
+            print_summary_metric(summaries, summary, SUMMARY_CPU_TIME, 10);
+            print_summary_metric(summaries, summary, SUMMARY_MEMORY_AVERAGE, 15);
+            print_summary_metric(summaries, summary, SUMMARY_MEMORY_PEAK, 15);
+            print_summary_metric(summaries, summary, SUMMARY_SAMPLES, 7);
+            report_styled(summary->complete ? color_green : color_yellow,
+                          "  %9s\n", summary->complete ? "complete" : "partial");
+        }
     }
 
     if (has_startup_results) {
@@ -1141,7 +1150,7 @@ static void jsonl_write_run(const AppConfig *config, const char *started_at) {
     yyjson_mut_doc *doc = jsonl_new_object(&object);
     if (doc == NULL) return;
     bool ok = yyjson_mut_obj_add_str(doc, object, "type", "run") &&
-              yyjson_mut_obj_add_uint(doc, object, "schema", 6) &&
+              yyjson_mut_obj_add_uint(doc, object, "schema", 7) &&
               yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
               yyjson_mut_obj_add_str(doc, object, "config", config->path) &&
               yyjson_mut_obj_add_str(doc, object, "monitor",
@@ -1169,15 +1178,23 @@ static void jsonl_write_result(const Summary *summary) {
     bool ok = yyjson_mut_obj_add_str(doc, object, "type", "result") &&
               yyjson_mut_obj_add_str(doc, object, "terminal", summary->terminal) &&
               yyjson_mut_obj_add_str(doc, object, "benchmark", summary->benchmark) &&
-              yyjson_mut_obj_add_real(doc, object, "wall_s",
-                                      summary->metrics.wall_seconds) &&
-              yyjson_mut_obj_add_bool(doc, object, "resources_available",
-                                      summary->metrics.resources_available) &&
+              yyjson_mut_obj_add_bool(doc, object, "resources_collected",
+                                      summary->resources_collected) &&
               yyjson_mut_obj_add_uint(doc, object, "samples", summary->samples) &&
               yyjson_mut_obj_add_uint(doc, object, "payload_bytes",
                                       (uint64_t)summary->bytes) &&
               yyjson_mut_obj_add_bool(doc, object, "complete", summary->complete);
-    if (ok && summary->metrics.resources_available) {
+    if (ok && summary->resources_collected) {
+        ok = yyjson_mut_obj_add_real(doc, object, "wall_s",
+                                     summary->metrics.wall_seconds) &&
+             yyjson_mut_obj_add_bool(doc, object, "resources_available",
+                                     summary->metrics.resources_available);
+    } else if (ok) {
+        ok = yyjson_mut_obj_add_null(doc, object, "wall_s") &&
+             yyjson_mut_obj_add_null(doc, object, "resources_available");
+    }
+    if (ok && summary->resources_collected &&
+        summary->metrics.resources_available) {
         ok = yyjson_mut_obj_add_real(doc, object, "cpu_s",
                                      summary->metrics.cpu_seconds) &&
              yyjson_mut_obj_add_real(doc, object, "cpu_pct", cpu_percent) &&
@@ -1481,11 +1498,24 @@ static void stop_terminal(pid_t child, bool already_reaped, int child_status,
     }
 }
 
+/* Resolve a worker event name to the configured benchmark collection policy. */
+static const BenchmarkRun *find_benchmark_run(const AppConfig *config,
+                                               const char *name) {
+    for (size_t i = 0; i < config->benchmark_count; ++i) {
+        if (strcmp(config->benchmarks[i].name, name) == 0) {
+            return &config->benchmarks[i];
+        }
+    }
+    return NULL;
+}
+
 /* Consume a control message and update the interval measurements. */
 static bool handle_event(char *line, const TerminalConfig *terminal,
-                         Monitor *monitor, SummaryList *summaries,
+                         const AppConfig *config, Monitor *monitor,
+                         SummaryList *summaries,
                          char *active_benchmark, size_t *active_bytes,
-                         bool *active, bool *ready, bool *done,
+                         bool *active, bool *active_resources,
+                         bool *monitor_running, bool *ready, bool *done,
                          bool *worker_failed, bool include_startup,
                          IsolationCheckResult *check_result, WorkerPhase phase,
                          uint64_t launch_ns,
@@ -1531,18 +1561,29 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         if (phase == WORKER_PHASE_STARTUP) {
             if (run_result == NULL) return false;
             uint64_t ready_ns = monotonic_now_ns();
-            run_result->metrics = monitor_end(monitor, ready_ns);
+            if (*monitor_running) {
+                run_result->metrics = monitor_end(monitor, ready_ns);
+                *monitor_running = false;
+            }
             run_result->duration_ns = ready_ns >= launch_ns
                                               ? ready_ns - launch_ns
                                               : 0;
         } else if (phase == WORKER_PHASE_BENCHMARK && include_startup) {
-            MonitorMetrics metrics = monitor_end(monitor, monotonic_now_ns());
+            MonitorMetrics metrics = {0};
+            const BenchmarkRun *startup = find_benchmark_run(config, "startup");
+            bool collect_startup = startup != NULL &&
+                !startup->benchmark->skip_resource_collection;
+            if (*monitor_running) {
+                metrics = monitor_end(monitor, monotonic_now_ns());
+                *monitor_running = false;
+            }
             Summary summary = {0};
             snprintf(summary.terminal, sizeof(summary.terminal), "%s",
                      terminal->name);
             snprintf(summary.benchmark, sizeof(summary.benchmark), "startup");
             summary.samples = 1;
             summary.metrics = metrics;
+            summary.resources_collected = collect_startup;
             summary.complete = true;
             if (!summary_push(summaries, &summary)) return false;
             jsonl_write_result(&summaries->items[summaries->count - 1]);
@@ -1557,13 +1598,23 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         char name[128];
         size_t bytes = 0;
         if (sscanf(line + 2, "%127s %zu", name, &bytes) != 2 || *active) return false;
+        const BenchmarkRun *run = find_benchmark_run(config, name);
+        if (run == NULL) return false;
         snprintf(active_benchmark, 128, "%s", name);
         *active_bytes = bytes;
+        *active_resources = !run->benchmark->skip_resource_collection;
         *active = true;
         if (phase == WORKER_PHASE_BENCHMARK) {
             set_terminal_title(terminal->name, name);
         }
-        monitor_begin(monitor, monotonic_now_ns());
+        if (*active_resources) {
+            monitor_begin(monitor, monotonic_now_ns());
+            *monitor_running = true;
+        } else if (*monitor_running) {
+            /* Stop launch-time sampling before an uncollected workload begins. */
+            monitor_end(monitor, monotonic_now_ns());
+            *monitor_running = false;
+        }
         return true;
     }
     if (line[0] == 'E' && line[1] == ' ') {
@@ -1583,12 +1634,17 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         summary.sample_mean_ms = mean_ms;
         summary.sample_p90_ms = p90_ms;
         summary.sample_stddev_ms = stddev_ms;
-        summary.metrics = monitor_end(monitor, monotonic_now_ns());
+        summary.resources_collected = *active_resources;
+        if (*active_resources && *monitor_running) {
+            summary.metrics = monitor_end(monitor, monotonic_now_ns());
+            *monitor_running = false;
+        }
         summary.complete = true;
         if (!summary_push(summaries, &summary)) return false;
         jsonl_write_result(&summary);
         print_summary(&summary);
         *active = false;
+        *active_resources = false;
         active_benchmark[0] = '\0';
         return true;
     }
@@ -1633,6 +1689,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     int stdout_fd = -1;
     int stderr_fd = -1;
     int capture_errno = 0;
+    bool monitor_running = false;
     char control_path[128] = {0};
     int keepalive_fd = -1;
     int control_fd = open_control_fifo(control_path, sizeof(control_path),
@@ -1810,7 +1867,17 @@ static bool run_terminal(const TerminalConfig *terminal,
         return false;
     }
     uint64_t launch_ns = monotonic_now_ns();
-    monitor_begin(monitor, launch_ns);
+    bool collect_initial_resources = phase == WORKER_PHASE_STARTUP ||
+        (phase == WORKER_PHASE_BENCHMARK && include_startup);
+    if (collect_initial_resources) {
+        const BenchmarkRun *startup = find_benchmark_run(config, "startup");
+        collect_initial_resources = startup != NULL &&
+            !startup->benchmark->skip_resource_collection;
+    }
+    if (collect_initial_resources) {
+        monitor_begin(monitor, launch_ns);
+        monitor_running = true;
+    }
     char release = 'G';
     ssize_t released;
     do {
@@ -1850,7 +1917,7 @@ static bool run_terminal(const TerminalConfig *terminal,
             capture_errno == 0) {
             capture_errno = errno;
         }
-        monitor_tick(monitor, monotonic_now_ns());
+        if (monitor_running) monitor_tick(monitor, monotonic_now_ns());
         if (polled < 0 && errno != EINTR) break;
         if (event.revents & POLLIN) {
             worker_started = true;
@@ -1868,7 +1935,10 @@ static bool run_terminal(const TerminalConfig *terminal,
     }
     if (worker_started) unlink(control_path);
     if (!worker_started) {
-        monitor_end(monitor, monotonic_now_ns());
+        if (monitor_running) {
+            monitor_end(monitor, monotonic_now_ns());
+            monitor_running = false;
+        }
         if (stop_signal == 0 && child_reaped) {
             report_styled(color_red,
                           "  Error: terminal exited before the worker sent a control event\n");
@@ -1902,6 +1972,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     bool done = false;
     bool worker_failed = false;
     bool active = false;
+    bool active_resources = false;
     char active_benchmark[128] = {0};
     size_t active_bytes = 0;
     char input[2048];
@@ -1938,7 +2009,7 @@ static bool run_terminal(const TerminalConfig *terminal,
             capture_errno == 0) {
             capture_errno = errno;
         }
-        if (!ready || active) monitor_tick(monitor, now);
+        if (monitor_running && (!ready || active)) monitor_tick(monitor, now);
         if (polled < 0 && errno != EINTR) break;
         if (event.revents & (POLLIN | POLLHUP)) {
             char chunk[512];
@@ -1958,9 +2029,10 @@ static bool run_terminal(const TerminalConfig *terminal,
                     if (input[i] != '\n') continue;
                     input[i] = '\0';
                     bool handled = handle_event(input + consumed, terminal,
-                                                monitor, summaries,
+                                                config, monitor, summaries,
                                                 active_benchmark, &active_bytes,
-                                                &active, &ready, &done,
+                                                &active, &active_resources,
+                                                &monitor_running, &ready, &done,
                                                 &worker_failed,
                                                 include_startup,
                                                 check_result, phase,
@@ -1988,18 +2060,28 @@ static bool run_terminal(const TerminalConfig *terminal,
     }
 
     if (active) {
-        MonitorMetrics partial = monitor_end(monitor, monotonic_now_ns());
+        MonitorMetrics partial = {0};
+        if (active_resources && monitor_running) {
+            partial = monitor_end(monitor, monotonic_now_ns());
+            monitor_running = false;
+        }
         Summary summary = {0};
         snprintf(summary.terminal, sizeof(summary.terminal), "%s", terminal->name);
         snprintf(summary.benchmark, sizeof(summary.benchmark), "%s",
                  active_benchmark);
         summary.bytes = active_bytes;
         summary.metrics = partial;
+        summary.resources_collected = active_resources;
         summary.complete = false;
         if (summary_push(summaries, &summary)) {
             jsonl_write_result(&summary);
             print_summary(&summary);
         }
+    }
+    if (monitor_running) {
+        /* Close the launch interval when no workload interval replaced it. */
+        monitor_end(monitor, monotonic_now_ns());
+        monitor_running = false;
     }
     close_control_fifo(control_fd, keepalive_fd, control_path);
     stop_terminal(child, child_reaped, child_status,
@@ -2039,6 +2121,9 @@ static bool run_startup_benchmark(const TerminalConfig *terminal,
                                  const char *executable_path,
                                  SummaryList *summaries) {
     set_terminal_title(terminal->name, "startup");
+    const BenchmarkRun *startup = find_benchmark_run(config, "startup");
+    bool collect_resources = startup != NULL &&
+        !startup->benchmark->skip_resource_collection;
     uint64_t *durations = NULL;
     size_t capacity = 0;
     unsigned samples = 0;
@@ -2046,7 +2131,7 @@ static bool run_startup_benchmark(const TerminalConfig *terminal,
     double total_cpu_seconds = 0;
     long double memory_integral = 0;
     uint64_t peak_memory_bytes = 0;
-    bool resources_available = true;
+    bool resources_available = collect_resources;
     bool complete = false;
     bool ok = true;
     uint64_t target_duration_ns =
@@ -2137,6 +2222,7 @@ static bool run_startup_benchmark(const TerminalConfig *terminal,
                                                                1000000000.0L))
                                                    : 0;
         summary.metrics.peak_memory_bytes = peak_memory_bytes;
+        summary.resources_collected = collect_resources;
         summary.complete = complete;
         if (!summary_push(summaries, &summary)) {
             report_styled(color_red,

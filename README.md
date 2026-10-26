@@ -214,19 +214,25 @@ flat result record per measured terminal and benchmark, and one end record.
 Each warmup output record includes that terminal's captured stdout and stderr.
 Output from process isolation checks and startup samples is
 suppressed and is not recorded.
-Results are not duplicated for printed summaries. The schema version is 6.
+Results are not duplicated for printed summaries. The schema version is 7.
 Durations use seconds or milliseconds as named, memory uses
 bytes, and `cpu_pct` is percent of one core. Missing resource measurements are
 JSON null. Workload results also include payload size and write-time statistics;
 partial results are marked with `"complete":false`. A check record's
 `cgroups_used` field indicates whether cgroup scopes were used, and
 `worker_moved` indicates whether the worker joined its separate cgroup.
+Each result's `resources_collected` field records whether its benchmark used
+interval collection. A benchmark can opt out with its
+`Benchmark.skip_resource_collection` flag.
+When false, the wall, CPU, and memory fields are null,
+`resources_available` is null, and that result is omitted from the collective
+resource table. Process isolation checks still run for these benchmarks.
 
 ```jsonl
-{"type":"run","schema":6,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
+{"type":"run","schema":7,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
 {"type":"process_isolation_check","terminal":"kitty/compact","status":"passed","cgroups_used":true,"worker_moved":true,"detail":"terminal isolated on CPU 2; worker is in its separate cgroup"}
 {"type":"warmup_output","terminal":"kitty/compact","stdout":"","stderr":""}
-{"type":"result","terminal":"kitty/compact","benchmark":"startup","wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
+{"type":"result","terminal":"kitty/compact","benchmark":"startup","resources_collected":true,"wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
 {"type":"end","status":"ok","results":1}
 ```
 

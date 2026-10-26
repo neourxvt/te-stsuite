@@ -66,6 +66,8 @@ typedef struct {
     const char *name;
     BenchPrepare prepare;
     BenchExecute execute;
+    /* Opt out of interval CPU, memory, and wall-time collection for this workload. */
+    bool skip_resource_collection;
 } Benchmark;
 
 /* One configured run, with a distinct name and independent runtime settings. */
