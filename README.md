@@ -153,6 +153,8 @@ arguments without shell expansion.
 Each terminal table can also include an optional one-line `version` entry such
 as `version = { cmd = "urxvt -h", head = 2 }`. The Precheck stage runs the
 command and prints its combined output; `head` limits it to the first `N` lines.
+Set `silence_output = true` in a terminal table to suppress its stdout and
+stderr during launches. Configured version output remains visible.
 
 The `process_isolation` setting selects `cgroupv2` or `taskset` and defaults to
 `taskset`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
@@ -201,8 +203,8 @@ samples and at least three seconds of measured startup time by default. The
 startup result reports the mean wall time, 90th percentile, and standard
 deviation across those launches. `max_samples` can cap the startup sample count
 as well as workload samples. Terminal stdout and stderr are shown and recorded
-once per terminal during its warmup; output from process isolation checks and
-startup samples is suppressed.
+once per terminal during its warmup unless `silence_output = true`; output from
+process isolation checks and startup samples is suppressed.
 Each later result measures PTY writes after the
 separate warmup phase. The printed workload wall time covers all measured
 writes; the write average, 90th percentile, and standard deviation cover
@@ -216,7 +218,8 @@ directory as `.log.te-stsuite-YYYYMMDD-HHMMSS.log` and
 The JSONL file is compact and contains run metadata, one process isolation
 check record per terminal, at most one warmup output record per terminal, one
 flat result record per measured terminal and benchmark, and one end record.
-Each warmup output record includes that terminal's captured stdout and stderr.
+Each warmup output record includes that terminal's captured stdout and stderr,
+or empty strings when `silence_output = true`.
 Precheck version output is printed and written to the text log. Process
 isolation check output and startup samples are suppressed and are not recorded.
 Results are not duplicated for printed summaries. The schema version is 8.

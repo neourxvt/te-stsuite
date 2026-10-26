@@ -1964,7 +1964,8 @@ static bool run_terminal(const TerminalConfig *terminal,
     }
     if (stop_signal != 0) return false;
     bool capture_outputs = run_result != NULL;
-    bool retain_output = phase == WORKER_PHASE_WARMUP;
+    bool retain_output = phase == WORKER_PHASE_WARMUP &&
+                         !terminal->silence_output;
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
     int stdout_fd = -1;
@@ -2084,6 +2085,18 @@ static bool run_terminal(const TerminalConfig *terminal,
             }
             close(stdout_pipe[1]);
             close(stderr_pipe[1]);
+        } else if (terminal->silence_output) {
+            /* Keep noisy emulator diagnostics out of normal benchmark output. */
+            int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (null_fd < 0 ||
+                dup2(null_fd, STDOUT_FILENO) < 0 ||
+                dup2(null_fd, STDERR_FILENO) < 0) {
+                dprintf(STDERR_FILENO,
+                        "te-stsuite: cannot silence terminal output: %s\n",
+                        strerror(errno));
+                _exit(126);
+            }
+            close(null_fd);
         }
         char release = 0;
         ssize_t gate_result;

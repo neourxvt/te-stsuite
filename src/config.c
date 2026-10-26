@@ -399,6 +399,7 @@ static bool append_terminal(AppConfig *config, const char *name,
                             toml_datum_t variant_content, bool has_variant,
                             const char *version_command,
                             bool has_version_head, unsigned version_head,
+                            bool silence_output,
                             toml_datum_t xresources, toml_datum_t env,
                             const TemplateVariables *variables,
                             char *error, size_t error_size) {
@@ -471,6 +472,7 @@ static bool append_terminal(AppConfig *config, const char *name,
         .version_command = version_copy,
         .version_head = version_head,
         .has_version_head = has_version_head,
+        .silence_output = silence_output,
         .inline_config = content_copy,
         .inline_config_length = content_length,
         .xresources = xresources_copy,
@@ -751,6 +753,15 @@ bool config_load(const char *path, AppConfig *config, char *error,
         toml_datum_t variants = toml_get(value, "configs");
         toml_datum_t xresources = toml_get(value, "xresources");
         toml_datum_t env = toml_get(value, "env");
+        toml_datum_t silence_output = toml_get(value, "silence_output");
+        if (silence_output.type != TOML_UNKNOWN &&
+            silence_output.type != TOML_BOOLEAN) {
+            snprintf(error, error_size,
+                     "terminal '%s' silence_output must be a boolean", key);
+            toml_free(result);
+            config_free(config);
+            return false;
+        }
         if (xresources.type != TOML_UNKNOWN &&
             xresources.type != TOML_TABLE) {
             snprintf(error, error_size,
@@ -783,6 +794,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
             bool appended = append_terminal(
                 config, key, command, NULL, (toml_datum_t){0}, false,
                 version_command, has_version_head, version_head,
+                silence_output.type == TOML_BOOLEAN &&
+                    silence_output.u.boolean,
                 xresources, env, &variables, error, error_size);
             free(version_command);
             if (!appended) {
@@ -799,7 +812,10 @@ bool config_load(const char *path, AppConfig *config, char *error,
                                  variants.u.tab.key[variant_index],
                                  variants.u.tab.value[variant_index], true,
                                  version_command, has_version_head,
-                                 version_head, xresources, env, &variables,
+                                 version_head,
+                                 silence_output.type == TOML_BOOLEAN &&
+                                     silence_output.u.boolean,
+                                 xresources, env, &variables,
                                  error, error_size)) {
                 appended_all = false;
                 break;

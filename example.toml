@@ -253,6 +253,7 @@ version = { cmd = "xterm -version" }
 # Keep Ghostty's user config from changing the benchmark's terminal setup.
 cmd = "ghostty --config-default-files=false --config-file={CFG} -e {CMD}"
 version = { cmd = "ghostty --version", head = 1 }
+silence_output = true
 
 [ghostty.configs]
 standard = """

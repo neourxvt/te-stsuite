@@ -94,6 +94,8 @@ typedef struct {
     char *version_command;
     unsigned version_head;
     bool has_version_head;
+    /* Suppress emulator output during launches; version probes stay visible. */
+    bool silence_output;
     char *inline_config;
     size_t inline_config_length;
     TerminalEnv *env;
