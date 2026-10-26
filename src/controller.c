@@ -91,6 +91,10 @@ static void request_stop(int signal_number) {
 static bool jsonl_error(void);
 static bool jsonl_write_doc(yyjson_mut_doc *doc, yyjson_mut_val *object);
 static yyjson_mut_doc *jsonl_new_object(yyjson_mut_val **object);
+static void jsonl_write_terminal_version(const char *terminal,
+                                         const char *command,
+                                         const CapturedStream *output,
+                                         bool succeeded, const char *detail);
 
 static const char *const color_reset = "\033[0m";
 static const char *const color_bold_cyan = "\033[1;36m";
@@ -946,6 +950,10 @@ static void report_terminal_version(const TerminalConfig *terminal,
     bool succeeded = run_version_command(terminal,
                                          config->options.startup_timeout_seconds,
                                          &output, error, sizeof(error));
+    jsonl_write_terminal_version(
+        terminal->emulator_name, terminal->version_command, &output,
+        succeeded, succeeded ? NULL
+                             : error[0] == '\0' ? "command failed" : error);
     if (output.length == 0) {
         report("  Version: %s\n",
                succeeded ? "(no output)" : error[0] == '\0'
@@ -1419,13 +1427,43 @@ static void jsonl_write_run(const AppConfig *config, const char *started_at) {
     yyjson_mut_doc *doc = jsonl_new_object(&object);
     if (doc == NULL) return;
     bool ok = yyjson_mut_obj_add_str(doc, object, "type", "run") &&
-              yyjson_mut_obj_add_uint(doc, object, "schema", 8) &&
+              yyjson_mut_obj_add_uint(doc, object, "schema", 9) &&
               yyjson_mut_obj_add_str(doc, object, "started_at", started_at) &&
               yyjson_mut_obj_add_str(doc, object, "config", config->path) &&
               yyjson_mut_obj_add_str(doc, object, "monitor",
                                      monitor_backend_name(config->monitor_backend)) &&
               yyjson_mut_obj_add_str(doc, object, "process_isolation",
                                      process_isolation_name(config->process_isolation));
+    if (!ok) {
+        yyjson_mut_doc_free(doc);
+        errno = ENOMEM;
+        jsonl_error();
+        return;
+    }
+    jsonl_write_doc(doc, object);
+}
+
+/* Record the combined version probe output once per selected emulator. */
+static void jsonl_write_terminal_version(const char *terminal,
+                                         const char *command,
+                                         const CapturedStream *output,
+                                         bool succeeded, const char *detail) {
+    yyjson_mut_val *object = NULL;
+    yyjson_mut_doc *doc = jsonl_new_object(&object);
+    if (doc == NULL) return;
+    bool ok = yyjson_mut_obj_add_str(doc, object, "type", "terminal_version") &&
+              yyjson_mut_obj_add_str(doc, object, "terminal", terminal) &&
+              yyjson_mut_obj_add_str(doc, object, "command", command) &&
+              yyjson_mut_obj_add_str(doc, object, "status",
+                                     succeeded ? "ok" : "failed") &&
+              yyjson_mut_obj_add_strn(doc, object, "output",
+                                      output->data == NULL ? "" : output->data,
+                                      output->length);
+    if (ok) {
+        ok = detail == NULL
+                 ? yyjson_mut_obj_add_null(doc, object, "detail")
+                 : yyjson_mut_obj_add_str(doc, object, "detail", detail);
+    }
     if (!ok) {
         yyjson_mut_doc_free(doc);
         errno = ENOMEM;

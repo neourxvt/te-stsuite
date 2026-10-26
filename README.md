@@ -216,14 +216,18 @@ all terminals finish. Matching logs are created in the current working
 directory as `.log.te-stsuite-YYYYMMDD-HHMMSS.log` and
 `.log.te-stsuite-YYYYMMDD-HHMMSS.jsonl`.
 
-The JSONL file is compact and contains run metadata, one process isolation
-check record per terminal, at most one warmup output record per terminal, one
-flat result record per measured terminal and benchmark, and one end record.
+The JSONL file is compact and contains run metadata, one version record per
+selected terminal emulator with a configured version command, one process
+isolation check per terminal config, at most one warmup output record per
+terminal config, one flat result record per measured terminal and benchmark,
+and one end record. Version records store the command, status, combined output,
+and any failure detail.
 Each warmup output record includes that terminal's captured stdout and stderr,
 or empty strings when `silence_output = true`.
-Precheck version output is printed and written to the text log. Process
-isolation check output and startup samples are suppressed and are not recorded.
-Results are not duplicated for printed summaries. The schema version is 8.
+Precheck version output is printed and written to the text and JSONL logs.
+Process isolation check output and startup samples are suppressed and are not
+recorded. Results are not duplicated for printed summaries. The schema version
+is 9.
 Durations use seconds or milliseconds as named, memory uses
 bytes, and `cpu_pct` is percent of one core. Missing resource measurements are
 JSON null. Workload results also include payload size and write-time statistics;
@@ -240,7 +244,8 @@ The `cell_dimensions` result also records `cell_width_px` and
 `cell_height_px`.
 
 ```jsonl
-{"type":"run","schema":8,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
+{"type":"run","schema":9,"started_at":"2026-10-25T08:00:00Z","config":"/path/to/example.toml","monitor":"cgroupv2","process_isolation":"cgroupv2"}
+{"type":"terminal_version","terminal":"kitty","command":"kitty --version","status":"ok","output":"kitty 0.40.1","detail":null}
 {"type":"process_isolation_check","terminal":"kitty/compact","status":"passed","cgroups_used":true,"worker_moved":true,"detail":"terminal isolated on CPU 2; worker is in its separate cgroup"}
 {"type":"warmup_output","terminal":"kitty/compact","stdout":"","stderr":""}
 {"type":"result","terminal":"kitty/compact","benchmark":"startup","resources_collected":true,"wall_s":0.08,"resources_available":true,"samples":10,"payload_bytes":0,"complete":true,"cpu_s":0.01,"cpu_pct":12.5,"mem_avg_bytes":7340032,"mem_peak_bytes":8388608,"startup_avg_ms":80,"startup_p90_ms":84,"startup_sd_ms":3}
