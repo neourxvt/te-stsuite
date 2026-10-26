@@ -36,6 +36,8 @@ pause_ms = 1000
 
 [variables]
 # Base16 Default Dark colors. Use {NAME} to substitute values in strings below.
+FONT_FAMILY = "monospace"
+FONT_SIZE = "11"
 BASE00 = "#000000"
 BASE01 = "#282828"
 BASE02 = "#383838"
@@ -55,7 +57,7 @@ BASE0F = "#a16946"
 
 # Each named table configures a terminal. Its cmd must include {CMD} as a
 # standalone word; pass inline configs through {CFG} or an env reference below.
-# Use a minimal monospace font configuration at size 11 for each terminal.
+# Terminal configs share FONT_FAMILY and FONT_SIZE from [variables].
 # Kitty also offers a profile with latency settings for comparison.
 [alacritty]
 cmd = "alacritty --config-file {CFG} -e {CMD}"
@@ -63,8 +65,8 @@ cmd = "alacritty --config-file {CFG} -e {CMD}"
 [alacritty.configs]
 standard = """
 [font]
-normal = { family = "monospace" }
-size = 11.0
+normal = { family = "{FONT_FAMILY}" }
+size = {FONT_SIZE}.0
 """
 
 [kitty]
@@ -74,8 +76,8 @@ cmd = "kitty --config {CFG} {CMD}"
 # The terminal command uses {CFG} in place of that file's path.
 [kitty.configs]
 defaults = """
-font_family monospace
-font_size 11.0
+font_family {FONT_FAMILY}
+font_size {FONT_SIZE}.0
 foreground {BASE05}
 background {BASE00}
 cursor {BASE05}
@@ -107,8 +109,8 @@ color21 {BASE06}
 """
 
 minlatency = """
-font_family monospace
-font_size 11.0
+font_family {FONT_FAMILY}
+font_size {FONT_SIZE}.0
 foreground {BASE05}
 background {BASE00}
 cursor {BASE05}
@@ -149,7 +151,7 @@ cmd = "nrxvt -e {CMD}"
 
 # X resource clients receive their font settings through XENVIRONMENT.
 [nrxvt.xresources]
-"nrxvt*font" = "xft:monospace:size=11"
+"nrxvt*font" = "xft:{FONT_FAMILY}:size={FONT_SIZE}"
 "nrxvt*skipXIM" = true
 "*.foreground" = "{BASE05}"
 "*.background" = "{BASE00}"
@@ -181,7 +183,7 @@ cmd = "nrxvt -e {CMD}"
 cmd = "/usr/bin/urxvt -e {CMD}"
 
 [urxvt.xresources]
-"URxvt*font" = "xft:monospace:size=11"
+"URxvt*font" = "xft:{FONT_FAMILY}:size={FONT_SIZE}"
 "URxvt*skipXim" = true
 "*.foreground" = "{BASE05}"
 "*.background" = "{BASE00}"
@@ -214,8 +216,8 @@ cmd = "xterm -e {CMD}"
 
 # Optional X resources are written to a temporary file for this terminal run.
 [xterm.xresources]
-"xterm*faceName" = "monospace"
-"xterm*faceSize" = 11
+"xterm*faceName" = "{FONT_FAMILY}"
+"xterm*faceSize" = "{FONT_SIZE}"
 "*.foreground" = "{BASE05}"
 "*.background" = "{BASE00}"
 "*.cursorColor" = "{BASE05}"
@@ -248,8 +250,8 @@ cmd = '''sh -c 'ghostty_config=$1; shift; exec ghostty --config-default-files=fa
 
 [ghostty.configs]
 standard = """
-font-family = monospace
-font-size = 11
+font-family = "{FONT_FAMILY}"
+font-size = {FONT_SIZE}
 """
 
 [rio]
@@ -262,8 +264,8 @@ RIO_CONFIG_HOME = "{CFG_DIR}"
 [rio.configs]
 standard = """
 [fonts]
-family = "monospace"
-size = 11.0
+family = "{FONT_FAMILY}"
+size = {FONT_SIZE}.0
 """
 
 # [contour]
@@ -273,7 +275,7 @@ size = 11.0
 # profiles:
 #   standard:
 #     font:
-#       size: 11
+#       size: {FONT_SIZE}
 #       regular:
-#         family: monospace
+#         family: {FONT_FAMILY}
 # """
