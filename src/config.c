@@ -8,18 +8,122 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Copy a TOML string using its recorded length rather than an implicit size. */
-static char *copy_toml_string(toml_datum_t datum) {
+/* Keep variable definitions as views into the TOML document during loading. */
+typedef struct {
+    toml_datum_t table;
+} TemplateVariables;
+
+/* Load named string values used to expand {NAME} references in TOML strings. */
+static bool read_template_variables(toml_datum_t root,
+                                    TemplateVariables *variables,
+                                    char *error, size_t error_size) {
+    toml_datum_t table = toml_get(root, "variables");
+    if (table.type == TOML_UNKNOWN) return true;
+    if (table.type != TOML_TABLE) {
+        snprintf(error, error_size, "variables must be a table of strings");
+        return false;
+    }
+
+    for (int i = 0; i < table.u.tab.size; ++i) {
+        const char *name = table.u.tab.key[i];
+        size_t name_length = (size_t)table.u.tab.len[i];
+        toml_datum_t value = table.u.tab.value[i];
+        bool valid_name = name_length > 0 &&
+            ((name[0] >= 'A' && name[0] <= 'Z') ||
+             (name[0] >= 'a' && name[0] <= 'z') || name[0] == '_');
+        for (size_t j = 1; j < name_length && valid_name; ++j) {
+            unsigned char byte = (unsigned char)name[j];
+            valid_name = (byte >= 'A' && byte <= 'Z') ||
+                         (byte >= 'a' && byte <= 'z') ||
+                         (byte >= '0' && byte <= '9') || byte == '_';
+        }
+        if (name_length == 0 || !valid_name ||
+            (name_length == 3 && memcmp(name, "CMD", 3) == 0) ||
+            (name_length == 3 && memcmp(name, "CFG", 3) == 0) ||
+            (name_length == 7 && memcmp(name, "CFG_DIR", 7) == 0) ||
+            value.type != TOML_STRING || value.u.str.ptr == NULL ||
+            value.u.str.len < 0 ||
+            memchr(value.u.str.ptr, '\0', (size_t)value.u.str.len) != NULL) {
+            snprintf(error, error_size,
+                     "variables need identifier names other than CMD, CFG, or CFG_DIR and NUL-free string values");
+            return false;
+        }
+    }
+    variables->table = table;
+    return true;
+}
+
+/* Find a variable only when the complete brace token matches. */
+static toml_datum_t find_template_variable(
+    const TemplateVariables *variables, const char *name, size_t name_length) {
+    for (int i = 0; i < variables->table.u.tab.size; ++i) {
+        size_t variable_name_length = (size_t)variables->table.u.tab.len[i];
+        if (variable_name_length == name_length &&
+            memcmp(variables->table.u.tab.key[i], name, name_length) == 0) {
+            return variables->table.u.tab.value[i];
+        }
+    }
+    return (toml_datum_t){0};
+}
+
+/* Expand known {NAME} tokens while preserving unrelated terminal placeholders. */
+static char *template_string(const char *source, size_t source_length,
+                             const TemplateVariables *variables,
+                             size_t *result_length, char *error,
+                             size_t error_size) {
+    if (source == NULL || source_length > INT_MAX ||
+        memchr(source, '\0', source_length) != NULL) {
+        snprintf(error, error_size, "configuration strings must not contain NUL bytes");
+        return NULL;
+    }
+
+    Buffer expanded;
+    buffer_init(&expanded);
+    for (size_t i = 0; i < source_length;) {
+        if (source[i] == '{') {
+            const char *close = memchr(source + i + 1, '}', source_length - i - 1);
+            if (close != NULL) {
+                size_t name_length = (size_t)(close - (source + i + 1));
+                toml_datum_t variable = find_template_variable(
+                    variables, source + i + 1, name_length);
+                if (variable.type == TOML_STRING) {
+                    if (!buffer_append(&expanded, variable.u.str.ptr,
+                                       (size_t)variable.u.str.len)) goto memory_error;
+                    i += name_length + 2;
+                    continue;
+                }
+            }
+        }
+        if (!buffer_append_char(&expanded, (unsigned char)source[i++])) {
+            goto memory_error;
+        }
+    }
+
+    char *result = malloc(expanded.length + 1);
+    if (result == NULL) goto memory_error;
+    if (expanded.length > 0) memcpy(result, expanded.data, expanded.length);
+    result[expanded.length] = '\0';
+    *result_length = expanded.length;
+    buffer_free(&expanded);
+    return result;
+
+memory_error:
+    snprintf(error, error_size, "out of memory while expanding configuration string");
+    buffer_free(&expanded);
+    return NULL;
+}
+
+/* Copy and template a TOML string using its recorded length. */
+static char *template_toml_string(toml_datum_t datum,
+                                  const TemplateVariables *variables,
+                                  size_t *result_length, char *error,
+                                  size_t error_size) {
     if (datum.type != TOML_STRING || datum.u.str.ptr == NULL ||
         datum.u.str.len < 0) {
         return NULL;
     }
-    size_t length = (size_t)datum.u.str.len;
-    char *copy = malloc(length + 1);
-    if (copy == NULL) return NULL;
-    memcpy(copy, datum.u.str.ptr, length);
-    copy[length] = '\0';
-    return copy;
+    return template_string(datum.u.str.ptr, (size_t)datum.u.str.len,
+                           variables, result_length, error, error_size);
 }
 
 /* Apply an optional unsigned integer setting after checking its TOML type. */
@@ -40,7 +144,8 @@ static bool read_option(toml_datum_t table, const char *key,
 /* Serialize a TOML resource table as one X resource specification per row. */
 static bool serialize_xresources(toml_datum_t table, char **content,
                                  size_t *content_length, char *error,
-                                 size_t error_size) {
+                                 size_t error_size,
+                                 const TemplateVariables *variables) {
     Buffer serialized;
     buffer_init(&serialized);
     for (int i = 0; i < table.u.tab.size; ++i) {
@@ -48,6 +153,7 @@ static bool serialize_xresources(toml_datum_t table, char **content,
         int key_length = table.u.tab.len[i];
         toml_datum_t value = table.u.tab.value[i];
         char scalar[64];
+        char *expanded_value = NULL;
         const char *value_text = NULL;
         size_t value_length = 0;
 
@@ -64,17 +170,29 @@ static bool serialize_xresources(toml_datum_t table, char **content,
 
         switch (value.type) {
         case TOML_STRING:
-            if (value.u.str.ptr == NULL || value.u.str.len < 0 ||
-                memchr(value.u.str.ptr, '\0', (size_t)value.u.str.len) != NULL ||
-                memchr(value.u.str.ptr, '\n', (size_t)value.u.str.len) != NULL ||
-                memchr(value.u.str.ptr, '\r', (size_t)value.u.str.len) != NULL) {
+            if (value.u.str.ptr == NULL || value.u.str.len < 0) {
                 snprintf(error, error_size,
                          "xresources values must be single-line TOML scalars");
                 buffer_free(&serialized);
                 return false;
             }
-            value_text = value.u.str.ptr;
-            value_length = (size_t)value.u.str.len;
+            expanded_value = template_string(value.u.str.ptr,
+                                             (size_t)value.u.str.len,
+                                             variables, &value_length, error,
+                                             error_size);
+            if (expanded_value == NULL) {
+                buffer_free(&serialized);
+                return false;
+            }
+            if (memchr(expanded_value, '\n', value_length) != NULL ||
+                memchr(expanded_value, '\r', value_length) != NULL) {
+                snprintf(error, error_size,
+                         "xresources values must be single-line TOML scalars");
+                free(expanded_value);
+                buffer_free(&serialized);
+                return false;
+            }
+            value_text = expanded_value;
             break;
         case TOML_INT64: {
             int length = snprintf(scalar, sizeof(scalar), "%lld",
@@ -103,10 +221,12 @@ static bool serialize_xresources(toml_datum_t table, char **content,
             return false;
         }
 
-        if (!buffer_append(&serialized, key, (size_t)key_length) ||
-            !buffer_append(&serialized, ": ", 2) ||
-            !buffer_append(&serialized, value_text, value_length) ||
-            !buffer_append_char(&serialized, '\n')) {
+        bool appended = buffer_append(&serialized, key, (size_t)key_length) &&
+            buffer_append(&serialized, ": ", 2) &&
+            buffer_append(&serialized, value_text, value_length) &&
+            buffer_append_char(&serialized, '\n');
+        free(expanded_value);
+        if (!appended) {
             goto memory_error;
         }
     }
@@ -152,7 +272,8 @@ void config_free(AppConfig *config) {
 
 /* Preserve literal environment values and validate optional config references. */
 static bool read_terminal_env(toml_datum_t table, TerminalConfig *terminal,
-                               char *error, size_t error_size) {
+                              const TemplateVariables *variables,
+                              char *error, size_t error_size) {
     if (table.type == TOML_UNKNOWN) return true;
     if (table.type != TOML_TABLE) {
         snprintf(error, error_size, "terminal '%s' env must be a table",
@@ -170,14 +291,18 @@ static bool read_terminal_env(toml_datum_t table, TerminalConfig *terminal,
         toml_datum_t value = table.u.tab.value[i];
         if (length <= 0 || memchr(name, '=', (size_t)length) != NULL ||
             memchr(name, '\0', (size_t)length) != NULL ||
-            value.type != TOML_STRING || value.u.str.len < 0 ||
-            memchr(value.u.str.ptr, '\0', (size_t)value.u.str.len) != NULL) {
+            value.type != TOML_STRING || value.u.str.ptr == NULL ||
+            value.u.str.len < 0) {
             snprintf(error, error_size,
                      "terminal '%s' env needs nonempty names without '=' and string values without NUL bytes",
                      terminal->name);
             return false;
         }
-        const char *text = value.u.str.ptr;
+        size_t value_length = 0;
+        char *text = template_toml_string(value, variables, &value_length,
+                                          error, error_size);
+        if (text == NULL) return false;
+        (void)value_length;
         bool config_ref = strstr(text, "{CFG}") != NULL ||
                           strstr(text, "{CFG_DIR}") != NULL;
         if (config_ref && (terminal->inline_config == NULL ||
@@ -185,12 +310,13 @@ static bool read_terminal_env(toml_datum_t table, TerminalConfig *terminal,
             snprintf(error, error_size,
                      "terminal '%s' env config references must be exactly {CFG} or {CFG_DIR} and require configs",
                      terminal->name);
+            free(text);
             return false;
         }
         TerminalEnv *entry = &terminal->env[terminal->env_count++];
         entry->name = strndup(name, (size_t)length);
-        entry->value = copy_toml_string(value);
-        if (entry->name == NULL || entry->value == NULL) {
+        entry->value = text;
+        if (entry->name == NULL) {
             snprintf(error, error_size, "out of memory while loading terminal env");
             return false;
         }
@@ -203,8 +329,13 @@ static bool append_terminal(AppConfig *config, const char *name,
                             toml_datum_t command, const char *variant_name,
                             toml_datum_t variant_content, bool has_variant,
                             toml_datum_t xresources, toml_datum_t env,
+                            const TemplateVariables *variables,
                             char *error, size_t error_size) {
-    char *command_copy = copy_toml_string(command);
+    size_t command_length = 0;
+    char *command_copy = template_toml_string(command, variables,
+                                              &command_length, error,
+                                              error_size);
+    (void)command_length;
     char *name_copy = NULL;
     char *content_copy = NULL;
     size_t content_length = 0;
@@ -213,7 +344,8 @@ static bool append_terminal(AppConfig *config, const char *name,
 
     if (xresources.type == TOML_TABLE &&
         !serialize_xresources(xresources, &xresources_copy,
-                              &xresources_length, error, error_size)) {
+                              &xresources_length, error, error_size,
+                              variables)) {
         free(command_copy);
         return false;
     }
@@ -224,11 +356,9 @@ static bool append_terminal(AppConfig *config, const char *name,
                 name_copy = NULL;
             }
         }
-        content_copy = copy_toml_string(variant_content);
-        if (variant_content.type == TOML_STRING &&
-            variant_content.u.str.len >= 0) {
-            content_length = (size_t)variant_content.u.str.len;
-        }
+        content_copy = template_toml_string(variant_content, variables,
+                                            &content_length, error,
+                                            error_size);
     } else {
         name_copy = strdup(name);
     }
@@ -266,7 +396,7 @@ static bool append_terminal(AppConfig *config, const char *name,
         .xresources_length = xresources_length,
     };
     return read_terminal_env(env, &config->terminals[config->terminal_count - 1],
-                             error, error_size);
+                             variables, error, error_size);
 }
 
 /* Append an independently configured run while preserving suite order. */
@@ -436,6 +566,14 @@ bool config_load(const char *path, AppConfig *config, char *error,
         return false;
     }
 
+    TemplateVariables variables = {0};
+    if (!read_template_variables(result.toptab, &variables, error,
+                                 error_size)) {
+        toml_free(result);
+        config_free(config);
+        return false;
+    }
+
     unsigned long long min_bytes = config->options.min_bytes;
     unsigned long long warmup = config->options.warmup;
     unsigned long long max_seconds = config->options.max_seconds;
@@ -447,7 +585,10 @@ bool config_load(const char *path, AppConfig *config, char *error,
     unsigned long long startup_timeout = config->options.startup_timeout_seconds;
     toml_datum_t monitor_name = toml_get(result.toptab, "monitor");
     if (monitor_name.type != TOML_UNKNOWN) {
-        char *name = copy_toml_string(monitor_name);
+        size_t name_length = 0;
+        char *name = template_toml_string(monitor_name, &variables,
+                                          &name_length, error, error_size);
+        (void)name_length;
         if (name == NULL ||
             !monitor_backend_parse(name, &config->monitor_backend)) {
             snprintf(error, error_size,
@@ -461,7 +602,10 @@ bool config_load(const char *path, AppConfig *config, char *error,
     }
     toml_datum_t isolation_name = toml_get(result.toptab, "process_isolation");
     if (isolation_name.type != TOML_UNKNOWN) {
-        char *name = copy_toml_string(isolation_name);
+        size_t name_length = 0;
+        char *name = template_toml_string(isolation_name, &variables,
+                                          &name_length, error, error_size);
+        (void)name_length;
         if (name == NULL ||
             !process_isolation_parse(name, &config->process_isolation)) {
             snprintf(error, error_size,
@@ -516,7 +660,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
     for (int i = 0; i < result.toptab.u.tab.size; ++i) {
         const char *key = result.toptab.u.tab.key[i];
         toml_datum_t value = result.toptab.u.tab.value[i];
-        if (strcmp(key, "typometer") == 0) continue;
+        if (strcmp(key, "typometer") == 0 ||
+            strcmp(key, "variables") == 0) continue;
         if (value.type != TOML_TABLE) {
             continue;
         }
@@ -535,8 +680,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
         }
         if (variants.type == TOML_UNKNOWN) {
             if (!append_terminal(config, key, command, NULL,
-                                 (toml_datum_t){0}, false, xresources, env, error,
-                                 error_size)) {
+                                 (toml_datum_t){0}, false, xresources, env,
+                                 &variables, error, error_size)) {
                 toml_free(result);
                 config_free(config);
                 return false;
@@ -556,7 +701,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
             if (!append_terminal(config, key, command,
                                  variants.u.tab.key[variant_index],
                                  variants.u.tab.value[variant_index], true,
-                                 xresources, env, error, error_size)) {
+                                 xresources, env, &variables, error,
+                                 error_size)) {
                 toml_free(result);
                 config_free(config);
                 return false;

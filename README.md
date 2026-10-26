@@ -47,12 +47,18 @@ startup_timeout_seconds = 30
 monitor = "cgroupv2"
 process_isolation = "taskset"
 
+[variables]
+BASE00 = "#181818"
+BASE05 = "#d8d8d8"
+
 [kitty]
 cmd = "kitty --config {CFG} {CMD}"
 
 [kitty.configs]
 compact = """
 font_size 11.0
+background {BASE00}
+foreground {BASE05}
 """
 
 large = """
@@ -134,9 +140,15 @@ each terminal launch and exposed through `XENVIRONMENT`; the file is removed
 when the launch ends. Config variants inherit the terminal's X resources. An
 empty table supplies an empty per-run file, and leaving the table out preserves
 the inherited environment. This adds resources for X clients that honor
-`XENVIRONMENT` while retaining resources already loaded into the display.
-Terminal command strings use whitespace, single or double quotes, and
-backslash escapes; they are split into arguments without shell expansion.
+`XENVIRONMENT` while retaining resources already loaded into the display. A
+top-level `[variables]` table defines string substitutions such as
+`BASE00 = "#181818"`; matching `{NAME}` references are replaced in TOML string
+values, including commands, inline configs, environment values, and X resource
+values. Unmatched placeholders such as `{CMD}` and `{CFG}` are kept for the
+terminal launcher. See the Base16 Default Dark values and terminal palette
+mappings in [example.toml](example.toml). Terminal command strings use
+whitespace, single or double quotes, and backslash escapes; they are split into
+arguments without shell expansion.
 
 The `process_isolation` setting selects `cgroupv2` or `taskset` and defaults to
 `taskset`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
