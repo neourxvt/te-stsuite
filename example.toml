@@ -36,7 +36,7 @@ pause_ms = 1000
 
 [variables]
 # Base16 Default Dark colors. Use {NAME} to substitute values in strings below.
-FONT_FAMILY = "monospace"
+FONT_FAMILY = "DejaVu Sans Mono"
 FONT_SIZE = "11"
 BASE00 = "#000000"
 BASE01 = "#282828"
