@@ -104,7 +104,9 @@ file. Bare `-t` prints help without a config; pass a config to also list its
 configured terminals. Add a name to either option to select it for the run;
 repeat named selectors to select more. Terminal names match the named TOML
 tables; selecting a terminal with config variants runs every variant, while a
-full name such as `kitty/compact` selects just that variant. The benchmark name
+full name such as `kitty/compact` selects just that variant. A sole `default`
+config is named after the terminal table alone; with multiple variants,
+`default` keeps the `TE/default` name. The benchmark name
 `typometer` selects every named Typometer configuration; `typometer/basic`
 selects only `basic`. Passing a config to bare `-b` also lists its Typometer
 configuration names.

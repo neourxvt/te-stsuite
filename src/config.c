@@ -430,7 +430,10 @@ static bool append_terminal(AppConfig *config, const char *name,
     }
 
     if (has_variant) {
-        if (variant_name != NULL && variant_name[0] != '\0') {
+        if (variant_name == NULL) {
+            /* A sole default config keeps the terminal's base name. */
+            name_copy = strdup(name);
+        } else if (variant_name[0] != '\0') {
             if (asprintf(&name_copy, "%s/%s", name, variant_name) < 0) {
                 name_copy = NULL;
             }
@@ -813,10 +816,15 @@ bool config_load(const char *path, AppConfig *config, char *error,
             continue;
         }
         bool appended_all = true;
+        bool only_default_variant = variants.u.tab.size == 1 &&
+            strcmp(variants.u.tab.key[0], "default") == 0;
         for (int variant_index = 0; variant_index < variants.u.tab.size;
              ++variant_index) {
+            const char *variant_name = only_default_variant
+                                           ? NULL
+                                           : variants.u.tab.key[variant_index];
             if (!append_terminal(config, key, command,
-                                 variants.u.tab.key[variant_index],
+                                 variant_name,
                                  variants.u.tab.value[variant_index], true,
                                  version_command, has_version_head,
                                  version_head,
