@@ -833,12 +833,15 @@ static int compare_summary_values(const void *left, const void *right) {
     return (first > second) - (first < second);
 }
 
-/* Compare completed runs of the same benchmark across terminal payload sizes. */
+/* Compare completed results that share the same benchmark name. */
 static void summary_metric_color(const SummaryList *summaries,
                                  const Summary *summary, SummaryMetric metric,
                                  double value, char *color, size_t size) {
     static const unsigned palette[] = {46, 82, 118, 154, 190, 226,
                                        220, 214, 208, 202, 196};
+    /* Keep small relative differences yellow and saturate at a 25% change. */
+    const double neutral_fraction = 0.05;
+    const double saturation_fraction = 0.25;
     unsigned index = 250;
     if (summary->complete && summary->samples > 0 && metric != SUMMARY_PAYLOAD) {
         double *values = malloc(summaries->count * sizeof(*values));
@@ -859,22 +862,43 @@ static void summary_metric_color(const SummaryList *summaries,
                                     ? values[value_count / 2 - 1] / 2.0 +
                                           values[value_count / 2] / 2.0
                                     : values[value_count / 2];
-                double red_threshold = median + (median - minimum);
                 size_t last = sizeof(palette) / sizeof(palette[0]) - 1;
+                size_t neutral_start = last / 2 - 1;
+                size_t neutral_end = last / 2 + 1;
                 if (minimum != values[value_count - 1]) {
-                    if (value == median) {
-                        index = palette[last / 2];
-                    } else if (value <= minimum) {
-                        index = palette[0];
-                    } else if (value >= red_threshold) {
-                        index = palette[last];
+                    if (median <= 0) {
+                        /* Zero has no useful percentage baseline for this cohort. */
+                        if (value < median) {
+                            index = palette[0];
+                        } else if (value > median) {
+                            index = palette[last];
+                        } else {
+                            index = palette[last / 2];
+                        }
                     } else {
-                        /* Below-median values use only the green-to-yellow half. */
-                        double position = value < median
-                                              ? 0.5 * (value - minimum) / (median - minimum)
-                                              : 0.5 + 0.5 * (value - median) /
-                                                    (red_threshold - median);
-                        index = palette[(size_t)(position * last + 0.5)];
+                        double relative_change = value / median - 1.0;
+                        double position;
+                        if (relative_change < -neutral_fraction) {
+                            double progress =
+                                (-relative_change - neutral_fraction) /
+                                (saturation_fraction - neutral_fraction);
+                            if (progress > 1.0) progress = 1.0;
+                            position = neutral_start * (1.0 - progress);
+                        } else if (relative_change > neutral_fraction) {
+                            double progress =
+                                (relative_change - neutral_fraction) /
+                                (saturation_fraction - neutral_fraction);
+                            if (progress > 1.0) progress = 1.0;
+                            position = neutral_end +
+                                       (last - neutral_end) * progress;
+                        } else {
+                            double progress =
+                                (relative_change + neutral_fraction) /
+                                (2.0 * neutral_fraction);
+                            position = neutral_start +
+                                       (neutral_end - neutral_start) * progress;
+                        }
+                        index = palette[(size_t)(position + 0.5)];
                     }
                 }
             }
@@ -935,6 +959,7 @@ static void print_collective_summary(const SummaryList *summaries) {
 
     report_styled(color_bold_cyan, "Collective results\n");
     report("Colors compare matching workloads within each column: green = better, red = worse.\n"
+           "Values within 5% of the median stay yellow; colors shift to green/red by 25%.\n"
            "Lower is better; N/Samples are uncolored; gray = no spread, partial, or payload size.\n\n");
     size_t resource_width = terminal_width + benchmark_width + 2 * 8 + 10 + 9 +
                             10 + 15 + 15 + 7 + 9;
