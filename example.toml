@@ -61,6 +61,7 @@ BASE0F = "#a16946"
 # Kitty also offers a profile with latency settings for comparison.
 [alacritty]
 cmd = "alacritty --config-file {CFG} -e {CMD}"
+version = { cmd = "alacritty --version" }
 
 [alacritty.configs]
 standard = """
@@ -71,6 +72,7 @@ size = {FONT_SIZE}.0
 
 [kitty]
 cmd = "kitty --config {CFG} {CMD}"
+version = { cmd = "kitty --version" }
 
 # Each key names a variant; its string is written to a temporary config file.
 # The terminal command uses {CFG} in place of that file's path.
@@ -148,6 +150,7 @@ wayland_enable_ime no
 
 [nrxvt]
 cmd = "nrxvt -e {CMD}"
+version = { cmd = "nrxvt -h", head = 2 }
 
 # X resource clients receive their font settings through XENVIRONMENT.
 [nrxvt.xresources]
@@ -181,6 +184,7 @@ cmd = "nrxvt -e {CMD}"
 
 [urxvt]
 cmd = "/usr/bin/urxvt -e {CMD}"
+version = { cmd = "/usr/bin/urxvt -h", head = 2 }
 
 [urxvt.xresources]
 "URxvt*font" = "xft:{FONT_FAMILY}:size={FONT_SIZE}"
@@ -213,6 +217,7 @@ cmd = "/usr/bin/urxvt -e {CMD}"
 
 [xterm]
 cmd = "xterm -e {CMD}"
+version = { cmd = "xterm -version" }
 
 # Optional X resources are written to a temporary file for this terminal run.
 [xterm.xresources]
@@ -247,6 +252,7 @@ cmd = "xterm -e {CMD}"
 [ghostty]
 # Keep Ghostty's user config from changing the benchmark's terminal setup.
 cmd = "ghostty --config-default-files=false --config-file={CFG} -e {CMD}"
+version = { cmd = "ghostty --version", head = 1 }
 
 [ghostty.configs]
 standard = """
@@ -256,6 +262,7 @@ font-size = {FONT_SIZE}
 
 [rio]
 cmd = "rio -e {CMD}"
+version = { cmd = "rio --version" }
 
 # Rio reads config.toml from the temporary config directory.
 [rio.env]
@@ -270,6 +277,7 @@ size = {FONT_SIZE}.0
 
 # [contour]
 # cmd = "contour terminal config {CFG} profile standard {CMD}"
+# version = { cmd = "contour --version" }
 # [contour.configs]
 # standard = """
 # profiles:

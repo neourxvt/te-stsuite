@@ -769,6 +769,211 @@ static void free_argv(char **argv, size_t argc) {
     free(argv);
 }
 
+/* Retain only the requested leading lines while draining the full command. */
+static bool append_version_output(CapturedStream *output, const char *data,
+                                  size_t length, bool has_head,
+                                  unsigned head, unsigned *line_count) {
+    if (!has_head) return captured_stream_append(output, data, length);
+    if (*line_count >= head) return true;
+
+    size_t retained = 0;
+    for (; retained < length && *line_count < head; ++retained) {
+        if (data[retained] == '\n') ++*line_count;
+    }
+    return captured_stream_append(output, data, retained);
+}
+
+/* Run one configured version command and capture its combined output. */
+static bool run_version_command(const TerminalConfig *terminal,
+                                unsigned timeout_seconds,
+                                CapturedStream *output, char *error,
+                                size_t error_size) {
+    StringList words = {0};
+    if (!split_command(terminal->version_command, &words, error, error_size)) {
+        string_list_free(&words);
+        return false;
+    }
+    char **argv = calloc(words.count + 1, sizeof(*argv));
+    if (argv == NULL) {
+        snprintf(error, error_size, "out of memory while preparing version command");
+        string_list_free(&words);
+        return false;
+    }
+    size_t argc = words.count;
+    for (size_t i = 0; i < argc; ++i) argv[i] = words.items[i];
+    free(words.items);
+    words.items = NULL;
+    words.count = 0;
+
+    int output_pipe[2] = {-1, -1};
+    if (pipe2(output_pipe, O_CLOEXEC) != 0 ||
+        !set_nonblocking(output_pipe[0])) {
+        int saved_errno = errno;
+        close_pipe_pair(output_pipe);
+        free_argv(argv, argc);
+        snprintf(error, error_size, "cannot capture version command: %s",
+                 strerror(saved_errno));
+        return false;
+    }
+
+    pid_t child = fork();
+    if (child < 0) {
+        int saved_errno = errno;
+        close_pipe_pair(output_pipe);
+        free_argv(argv, argc);
+        snprintf(error, error_size, "cannot start version command: %s",
+                 strerror(saved_errno));
+        return false;
+    }
+    if (child == 0) {
+        setpgid(0, 0);
+        close(output_pipe[0]);
+        if (dup2(output_pipe[1], STDOUT_FILENO) < 0 ||
+            dup2(output_pipe[1], STDERR_FILENO) < 0) {
+            _exit(126);
+        }
+        close(output_pipe[1]);
+        for (size_t i = 0; i < terminal->env_count; ++i) {
+            const TerminalEnv *entry = &terminal->env[i];
+            if (strcmp(entry->value, "{CFG}") == 0 ||
+                strcmp(entry->value, "{CFG_DIR}") == 0) continue;
+            if (setenv(entry->name, entry->value, 1) != 0) _exit(126);
+        }
+        execvp(argv[0], argv);
+        dprintf(STDERR_FILENO, "te-stsuite: cannot start '%s': %s\n",
+                argv[0], strerror(errno));
+        _exit(127);
+    }
+
+    close(output_pipe[1]);
+    output_pipe[1] = -1;
+    setpgid(child, child);
+    uint64_t deadline = monotonic_now_ns() +
+                        (uint64_t)timeout_seconds * 1000000000ULL;
+    unsigned line_count = 0;
+    bool stream_open = true;
+    bool child_reaped = false;
+    bool capture_ok = true;
+    int child_status = 0;
+    while (stream_open || !child_reaped) {
+        if (stop_signal != 0 || monotonic_now_ns() >= deadline) {
+            kill(-child, SIGKILL);
+            kill(child, SIGKILL);
+            while (waitpid(child, &child_status, 0) < 0 && errno == EINTR) {}
+            child_reaped = true;
+            snprintf(error, error_size, "%s",
+                     stop_signal != 0 ? "interrupted" : "command timed out");
+            break;
+        }
+
+        struct pollfd event = {.fd = output_pipe[0], .events = POLLIN};
+        int polled = poll(&event, stream_open ? 1 : 0, 100);
+        if (polled < 0 && errno != EINTR) {
+            snprintf(error, error_size, "cannot read version output: %s",
+                     strerror(errno));
+            capture_ok = false;
+            kill(-child, SIGKILL);
+            kill(child, SIGKILL);
+        }
+        if (stream_open && (event.revents & (POLLIN | POLLHUP | POLLERR))) {
+            char buffer[4096];
+            for (;;) {
+                ssize_t bytes = read(output_pipe[0], buffer, sizeof(buffer));
+                if (bytes > 0) {
+                    if (!append_version_output(output, buffer,
+                                               (size_t)bytes,
+                                               terminal->has_version_head,
+                                               terminal->version_head,
+                                               &line_count)) {
+                        snprintf(error, error_size,
+                                 "out of memory while capturing version output");
+                        capture_ok = false;
+                        kill(-child, SIGKILL);
+                        kill(child, SIGKILL);
+                    }
+                    continue;
+                }
+                if (bytes == 0) {
+                    close(output_pipe[0]);
+                    output_pipe[0] = -1;
+                    stream_open = false;
+                    break;
+                }
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                snprintf(error, error_size, "cannot read version output: %s",
+                         strerror(errno));
+                capture_ok = false;
+                close(output_pipe[0]);
+                output_pipe[0] = -1;
+                stream_open = false;
+                kill(-child, SIGKILL);
+                kill(child, SIGKILL);
+                break;
+            }
+        }
+        if (!child_reaped) {
+            pid_t status = waitpid(child, &child_status, WNOHANG);
+            if (status == child || (status < 0 && errno == ECHILD)) {
+                child_reaped = true;
+            }
+        }
+    }
+    if (output_pipe[0] >= 0) close(output_pipe[0]);
+    if (!child_reaped) {
+        while (waitpid(child, &child_status, 0) < 0 && errno == EINTR) {}
+    }
+    free_argv(argv, argc);
+    return capture_ok && child_reaped && WIFEXITED(child_status) &&
+           WEXITSTATUS(child_status) == 0;
+}
+
+/* Print captured command bytes to both the terminal and the run log. */
+static void report_raw(const char *bytes, size_t length) {
+    if (length == 0) return;
+    fwrite(bytes, 1, length, stdout);
+    if (log_file != NULL) fwrite(bytes, 1, length, log_file);
+    fflush(stdout);
+    if (log_file != NULL) fflush(log_file);
+}
+
+/* Show one terminal's optional version output in the precheck stage. */
+static void report_terminal_version(const TerminalConfig *terminal,
+                                    const AppConfig *config) {
+    if (terminal->version_command == NULL) return;
+    CapturedStream output = {0};
+    char error[256] = {0};
+    bool succeeded = run_version_command(terminal,
+                                         config->options.startup_timeout_seconds,
+                                         &output, error, sizeof(error));
+    if (output.length == 0) {
+        report("  Version: %s\n",
+               succeeded ? "(no output)" : error[0] == '\0'
+                              ? "command failed" : error);
+        captured_stream_free(&output);
+        return;
+    }
+
+    report("  Version:\n");
+    size_t offset = 0;
+    while (offset < output.length) {
+        report("    ");
+        size_t line_length = 0;
+        while (offset + line_length < output.length &&
+               output.data[offset + line_length] != '\n') {
+            ++line_length;
+        }
+        if (offset + line_length < output.length) ++line_length;
+        report_raw(output.data + offset, line_length);
+        offset += line_length;
+    }
+    if (output.data[output.length - 1] != '\n') report_raw("\n", 1);
+    if (!succeeded && error[0] != '\0') {
+        report("  Version command: %s\n", error);
+    }
+    captured_stream_free(&output);
+}
+
 /* Add one completed benchmark result to the collective summary list. */
 static bool summary_push(SummaryList *list, const Summary *summary) {
     if (list->count == list->capacity) {
@@ -1353,7 +1558,7 @@ static void print_isolation_check_summary(const IsolationCheckResult *results,
         size_t length = strlen(results[i].terminal);
         if (length > terminal_width) terminal_width = length;
     }
-    report_styled(color_bold_cyan, "\nProcess isolation check summary\n");
+    report_styled(color_bold_cyan, "\nPrecheck failure summary\n");
     report("%-*s  %-12s  %s\n", (int)terminal_width, "Terminal",
            "Status", "Detail");
     for (size_t i = 0; i < terminal_width + 2 + 12 + 2 + 6; ++i) {
@@ -2427,7 +2632,7 @@ static int run_controller(const AppConfig *config, const RunSelection *selection
         return finish_run_logs(false, log_path, jsonl_path);
     }
 
-    report_styled(color_bold_cyan, "Process isolation checks\n");
+    report_styled(color_bold_cyan, "Precheck\n");
     size_t terminal_number = 0;
     size_t check_index = 0;
     bool checks_passed = true;
@@ -2442,6 +2647,7 @@ static int run_controller(const AppConfig *config, const RunSelection *selection
                  "check did not complete; see the terminal error above");
         report_styled(color_cyan, "[%zu/%zu] %s\n", terminal_number,
                       selected_terminal_count, config->terminals[i].name);
+        report_terminal_version(&config->terminals[i], config);
         TerminalRunResult check_output;
         bool ok = run_terminal(&config->terminals[i], config, selection,
                                executable_path, WORKER_PHASE_CHECK, &summaries,
@@ -2474,7 +2680,7 @@ static int run_controller(const AppConfig *config, const RunSelection *selection
                           (int)stop_signal);
         } else {
             report_styled(color_red,
-                          "\nBenchmark run stopped before warmup because process isolation checks failed.\n");
+                          "\nBenchmark run stopped before warmup because the precheck failed.\n");
             print_isolation_check_summary(check_results, check_index,
                                           cgroups_required);
         }

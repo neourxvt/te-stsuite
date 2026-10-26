@@ -126,6 +126,74 @@ static char *template_toml_string(toml_datum_t datum,
                            variables, result_length, error, error_size);
 }
 
+/* Read a one-line version command and its optional captured-line limit. */
+static bool read_terminal_version(toml_datum_t version,
+                                  const TemplateVariables *variables,
+                                  char **command, bool *has_head,
+                                  unsigned *head, const char *terminal,
+                                  char *error, size_t error_size) {
+    *command = NULL;
+    *has_head = false;
+    *head = 0;
+    if (version.type == TOML_UNKNOWN) return true;
+    if (version.type != TOML_TABLE ||
+        (version.flag & TOML_FLAG_INLINED) == 0) {
+        snprintf(error, error_size,
+                 "terminal '%s' version must be a single-line inline table with cmd and optional head",
+                 terminal);
+        return false;
+    }
+
+    for (int i = 0; i < version.u.tab.size; ++i) {
+        const char *key = version.u.tab.key[i];
+        if (strcmp(key, "cmd") != 0 && strcmp(key, "head") != 0) {
+            snprintf(error, error_size,
+                     "terminal '%s' version only accepts cmd and head",
+                     terminal);
+            return false;
+        }
+    }
+
+    toml_datum_t command_datum = toml_get(version, "cmd");
+    size_t command_length = 0;
+    char *command_copy = template_toml_string(command_datum, variables,
+                                              &command_length, error,
+                                              error_size);
+    if (command_copy == NULL || command_length == 0 ||
+        command_datum.lineno != version.lineno ||
+        memchr(command_copy, '\n', command_length) != NULL ||
+        memchr(command_copy, '\r', command_length) != NULL) {
+        snprintf(error, error_size,
+                 "terminal '%s' version needs a nonempty single-line cmd",
+                 terminal);
+        free(command_copy);
+        return false;
+    }
+
+    toml_datum_t head_datum = toml_get(version, "head");
+    if (head_datum.type != TOML_UNKNOWN) {
+        if (head_datum.type != TOML_INT64 || head_datum.u.int64 < 0 ||
+            (uint64_t)head_datum.u.int64 > UINT_MAX) {
+            snprintf(error, error_size,
+                     "terminal '%s' version head must be a nonnegative integer",
+                     terminal);
+            free(command_copy);
+            return false;
+        }
+        if (head_datum.lineno != version.lineno) {
+            snprintf(error, error_size,
+                     "terminal '%s' version cmd and head must be on one line",
+                     terminal);
+            free(command_copy);
+            return false;
+        }
+        *has_head = true;
+        *head = (unsigned)head_datum.u.int64;
+    }
+    *command = command_copy;
+    return true;
+}
+
 /* Apply an optional unsigned integer setting after checking its TOML type. */
 static bool read_option(toml_datum_t table, const char *key,
                         unsigned long long maximum, unsigned long long *value,
@@ -254,6 +322,7 @@ void config_free(AppConfig *config) {
     for (size_t i = 0; i < config->terminal_count; ++i) {
         free(config->terminals[i].name);
         free(config->terminals[i].command);
+        free(config->terminals[i].version_command);
         free(config->terminals[i].inline_config);
         for (size_t j = 0; j < config->terminals[i].env_count; ++j) {
             free(config->terminals[i].env[j].name);
@@ -328,6 +397,8 @@ static bool read_terminal_env(toml_datum_t table, TerminalConfig *terminal,
 static bool append_terminal(AppConfig *config, const char *name,
                             toml_datum_t command, const char *variant_name,
                             toml_datum_t variant_content, bool has_variant,
+                            const char *version_command,
+                            bool has_version_head, unsigned version_head,
                             toml_datum_t xresources, toml_datum_t env,
                             const TemplateVariables *variables,
                             char *error, size_t error_size) {
@@ -338,6 +409,9 @@ static bool append_terminal(AppConfig *config, const char *name,
     (void)command_length;
     char *name_copy = NULL;
     char *content_copy = NULL;
+    char *version_copy = version_command == NULL
+                             ? NULL
+                             : strdup(version_command);
     size_t content_length = 0;
     char *xresources_copy = NULL;
     size_t xresources_length = 0;
@@ -347,6 +421,7 @@ static bool append_terminal(AppConfig *config, const char *name,
                               &xresources_length, error, error_size,
                               variables)) {
         free(command_copy);
+        free(version_copy);
         return false;
     }
 
@@ -364,13 +439,15 @@ static bool append_terminal(AppConfig *config, const char *name,
     }
 
     if (command_copy == NULL || name_copy == NULL || command_copy[0] == '\0' ||
-        (has_variant && content_copy == NULL)) {
+        (has_variant && content_copy == NULL) ||
+        (version_command != NULL && version_copy == NULL)) {
         snprintf(error, error_size,
                  "terminal '%s' needs a nonempty cmd and each config variant needs a nonempty name and string content",
                  name);
         free(command_copy);
         free(name_copy);
         free(content_copy);
+        free(version_copy);
         free(xresources_copy);
         return false;
     }
@@ -383,6 +460,7 @@ static bool append_terminal(AppConfig *config, const char *name,
         free(command_copy);
         free(name_copy);
         free(content_copy);
+        free(version_copy);
         free(xresources_copy);
         return false;
     }
@@ -390,6 +468,9 @@ static bool append_terminal(AppConfig *config, const char *name,
     config->terminals[config->terminal_count++] = (TerminalConfig){
         .name = name_copy,
         .command = command_copy,
+        .version_command = version_copy,
+        .version_head = version_head,
+        .has_version_head = has_version_head,
         .inline_config = content_copy,
         .inline_config_length = content_length,
         .xresources = xresources_copy,
@@ -678,17 +759,8 @@ bool config_load(const char *path, AppConfig *config, char *error,
             config_free(config);
             return false;
         }
-        if (variants.type == TOML_UNKNOWN) {
-            if (!append_terminal(config, key, command, NULL,
-                                 (toml_datum_t){0}, false, xresources, env,
-                                 &variables, error, error_size)) {
-                toml_free(result);
-                config_free(config);
-                return false;
-            }
-            continue;
-        }
-        if (variants.type != TOML_TABLE || variants.u.tab.size <= 0) {
+        if (variants.type != TOML_UNKNOWN &&
+            (variants.type != TOML_TABLE || variants.u.tab.size <= 0)) {
             snprintf(error, error_size,
                      "terminal '%s' configs must be a nonempty table of inline config strings",
                      key);
@@ -696,17 +768,48 @@ bool config_load(const char *path, AppConfig *config, char *error,
             config_free(config);
             return false;
         }
+
+        char *version_command = NULL;
+        bool has_version_head = false;
+        unsigned version_head = 0;
+        if (!read_terminal_version(toml_get(value, "version"), &variables,
+                                   &version_command, &has_version_head,
+                                   &version_head, key, error, error_size)) {
+            toml_free(result);
+            config_free(config);
+            return false;
+        }
+        if (variants.type == TOML_UNKNOWN) {
+            bool appended = append_terminal(
+                config, key, command, NULL, (toml_datum_t){0}, false,
+                version_command, has_version_head, version_head,
+                xresources, env, &variables, error, error_size);
+            free(version_command);
+            if (!appended) {
+                toml_free(result);
+                config_free(config);
+                return false;
+            }
+            continue;
+        }
+        bool appended_all = true;
         for (int variant_index = 0; variant_index < variants.u.tab.size;
              ++variant_index) {
             if (!append_terminal(config, key, command,
                                  variants.u.tab.key[variant_index],
                                  variants.u.tab.value[variant_index], true,
-                                 xresources, env, &variables, error,
-                                 error_size)) {
-                toml_free(result);
-                config_free(config);
-                return false;
+                                 version_command, has_version_head,
+                                 version_head, xresources, env, &variables,
+                                 error, error_size)) {
+                appended_all = false;
+                break;
             }
+        }
+        free(version_command);
+        if (!appended_all) {
+            toml_free(result);
+            config_free(config);
+            return false;
         }
     }
     if (!parsed_terminals || config->terminal_count == 0) {

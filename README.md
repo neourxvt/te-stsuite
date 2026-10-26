@@ -150,6 +150,9 @@ terminal launcher. See the Base16 Default Dark values and terminal palette
 mappings in [example.toml](example.toml). Terminal command strings use
 whitespace, single or double quotes, and backslash escapes; they are split into
 arguments without shell expansion.
+Each terminal table can also include an optional one-line `version` entry such
+as `version = { cmd = "urxvt -h", head = 2 }`. The Precheck stage runs the
+command and prints its combined output; `head` limits it to the first `N` lines.
 
 The `process_isolation` setting selects `cgroupv2` or `taskset` and defaults to
 `taskset`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
@@ -171,11 +174,12 @@ defaults to `taskset`.
 
 ## Measurements
 
-Before measuring, te-stsuite verifies the selected process isolation mode. When
-cgroups are in use, it also checks that each terminal and its worker are placed
-in separate accounting cgroups. It then launches every selected terminal once
-for a separate warmup phase. It uses the same configured command for checks,
-warmup, and measured runs. In
+The Precheck stage prints each configured terminal version and verifies the
+selected process isolation mode. When cgroups are in use, it also checks that
+each terminal and its worker are placed in separate accounting cgroups. It
+then launches every selected terminal once for a separate warmup phase. The
+configured terminal command is used for isolation checks, warmup, and measured
+runs. In
 `cgroupv2` mode, the worker runs on the remaining CPUs outside the isolated
 partition. Its resource use does not count toward the terminal.
 
@@ -213,8 +217,8 @@ The JSONL file is compact and contains run metadata, one process isolation
 check record per terminal, at most one warmup output record per terminal, one
 flat result record per measured terminal and benchmark, and one end record.
 Each warmup output record includes that terminal's captured stdout and stderr.
-Output from process isolation checks and startup samples is
-suppressed and is not recorded.
+Precheck version output is printed and written to the text log. Process
+isolation check output and startup samples are suppressed and are not recorded.
 Results are not duplicated for printed summaries. The schema version is 8.
 Durations use seconds or milliseconds as named, memory uses
 bytes, and `cpu_pct` is percent of one core. Missing resource measurements are
