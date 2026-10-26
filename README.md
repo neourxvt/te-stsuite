@@ -155,6 +155,7 @@ as `version = { cmd = "urxvt -h", head = 2 }`. The Precheck stage runs the
 command and prints its combined output; `head` limits it to the first `N` lines.
 Set `silence_output = true` in a terminal table to suppress its stdout and
 stderr during launches. Configured version output remains visible.
+When a terminal has config variants, Precheck prints its version only once.
 
 The `process_isolation` setting selects `cgroupv2` or `taskset` and defaults to
 `taskset`. In `cgroupv2` mode, each terminal runs in an isolated cpuset
@@ -176,8 +177,8 @@ defaults to `taskset`.
 
 ## Measurements
 
-The Precheck stage prints each configured terminal version and verifies the
-selected process isolation mode. When cgroups are in use, it also checks that
+The Precheck stage prints each selected terminal emulator's version once and
+verifies the selected process isolation mode. When cgroups are in use, it also checks that
 each terminal and its worker are placed in separate accounting cgroups. It
 then launches every selected terminal once for a separate warmup phase. The
 configured terminal command is used for isolation checks, warmup, and measured

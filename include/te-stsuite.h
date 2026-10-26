@@ -90,6 +90,7 @@ typedef struct {
 /* One configured terminal command from the TOML file. */
 typedef struct {
     char *name;
+    char *emulator_name;
     char *command;
     char *version_command;
     unsigned version_head;

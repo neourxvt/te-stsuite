@@ -321,6 +321,7 @@ void config_free(AppConfig *config) {
     free(config->path);
     for (size_t i = 0; i < config->terminal_count; ++i) {
         free(config->terminals[i].name);
+        free(config->terminals[i].emulator_name);
         free(config->terminals[i].command);
         free(config->terminals[i].version_command);
         free(config->terminals[i].inline_config);
@@ -409,6 +410,7 @@ static bool append_terminal(AppConfig *config, const char *name,
                                               error_size);
     (void)command_length;
     char *name_copy = NULL;
+    char *emulator_name_copy = strdup(name);
     char *content_copy = NULL;
     char *version_copy = version_command == NULL
                              ? NULL
@@ -422,6 +424,7 @@ static bool append_terminal(AppConfig *config, const char *name,
                               &xresources_length, error, error_size,
                               variables)) {
         free(command_copy);
+        free(emulator_name_copy);
         free(version_copy);
         return false;
     }
@@ -439,7 +442,8 @@ static bool append_terminal(AppConfig *config, const char *name,
         name_copy = strdup(name);
     }
 
-    if (command_copy == NULL || name_copy == NULL || command_copy[0] == '\0' ||
+    if (command_copy == NULL || name_copy == NULL ||
+        emulator_name_copy == NULL || command_copy[0] == '\0' ||
         (has_variant && content_copy == NULL) ||
         (version_command != NULL && version_copy == NULL)) {
         snprintf(error, error_size,
@@ -447,6 +451,7 @@ static bool append_terminal(AppConfig *config, const char *name,
                  name);
         free(command_copy);
         free(name_copy);
+        free(emulator_name_copy);
         free(content_copy);
         free(version_copy);
         free(xresources_copy);
@@ -460,6 +465,7 @@ static bool append_terminal(AppConfig *config, const char *name,
         snprintf(error, error_size, "out of memory while loading terminal list");
         free(command_copy);
         free(name_copy);
+        free(emulator_name_copy);
         free(content_copy);
         free(version_copy);
         free(xresources_copy);
@@ -468,6 +474,7 @@ static bool append_terminal(AppConfig *config, const char *name,
     config->terminals = terminals;
     config->terminals[config->terminal_count++] = (TerminalConfig){
         .name = name_copy,
+        .emulator_name = emulator_name_copy,
         .command = command_copy,
         .version_command = version_copy,
         .version_head = version_head,

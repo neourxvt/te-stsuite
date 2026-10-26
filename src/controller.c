@@ -974,6 +974,22 @@ static void report_terminal_version(const TerminalConfig *terminal,
     captured_stream_free(&output);
 }
 
+/* Print a version for the first selected config of each terminal emulator. */
+static bool terminal_version_was_reported(const AppConfig *config,
+                                          size_t terminal_index,
+                                          const RunSelection *selection) {
+    const TerminalConfig *terminal = &config->terminals[terminal_index];
+    for (size_t i = 0; i < terminal_index; ++i) {
+        const TerminalConfig *previous = &config->terminals[i];
+        if (previous->version_command != NULL &&
+            strcmp(previous->emulator_name, terminal->emulator_name) == 0 &&
+            terminal_is_selected(previous, selection)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Add one completed benchmark result to the collective summary list. */
 static bool summary_push(SummaryList *list, const Summary *summary) {
     if (list->count == list->capacity) {
@@ -2660,7 +2676,9 @@ static int run_controller(const AppConfig *config, const RunSelection *selection
                  "check did not complete; see the terminal error above");
         report_styled(color_cyan, "[%zu/%zu] %s\n", terminal_number,
                       selected_terminal_count, config->terminals[i].name);
-        report_terminal_version(&config->terminals[i], config);
+        if (!terminal_version_was_reported(config, i, selection)) {
+            report_terminal_version(&config->terminals[i], config);
+        }
         TerminalRunResult check_output;
         bool ok = run_terminal(&config->terminals[i], config, selection,
                                executable_path, WORKER_PHASE_CHECK, &summaries,
