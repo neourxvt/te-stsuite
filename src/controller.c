@@ -73,6 +73,7 @@ static FILE *jsonl_file;
 static size_t jsonl_result_count;
 static bool jsonl_failed;
 static bool color_enabled;
+static int terminal_title_fd = -1;
 
 /* Signal handlers only request cancellation; normal control flow owns cleanup. */
 static volatile sig_atomic_t stop_signal;
@@ -95,6 +96,51 @@ static const char *const color_yellow = "\033[33m";
 static const char *const color_red = "\033[31m";
 static const char *const color_dim = "\033[2m";
 static const char *const color_banner = "\033[38;5;5m";
+
+/* Send a title update directly to the controlling terminal, outside the log. */
+static void set_terminal_title(const char *terminal, const char *benchmark) {
+    if (terminal_title_fd < 0) return;
+
+    char title[272];
+    int title_length = terminal == NULL
+                           ? snprintf(title, sizeof(title), "te-stsuite")
+                           : snprintf(title, sizeof(title), "Ꜩ %s:%s",
+                                      terminal, benchmark);
+    if (title_length < 0 || (size_t)title_length >= sizeof(title)) return;
+
+    /* Configured names must not be able to inject terminal control sequences. */
+    for (size_t i = 0; i < (size_t)title_length; ++i) {
+        unsigned char byte = (unsigned char)title[i];
+        if (byte < 0x20 || byte == 0x7f) title[i] = ' ';
+    }
+
+    char sequence[sizeof(title) + 5];
+    int sequence_length = snprintf(sequence, sizeof(sequence), "\033]0;%s\007",
+                                   title);
+    if (sequence_length < 0 || (size_t)sequence_length >= sizeof(sequence)) return;
+
+    size_t written = 0;
+    while (written < (size_t)sequence_length) {
+        ssize_t result = write(terminal_title_fd, sequence + written,
+                               (size_t)sequence_length - written);
+        if (result < 0 && errno == EINTR) continue;
+        if (result <= 0) break;
+        written += (size_t)result;
+    }
+}
+
+/* Open the controlling terminal once so title sequences never enter logs. */
+static void begin_terminal_title(void) {
+    terminal_title_fd = open("/dev/tty", O_WRONLY | O_CLOEXEC);
+    set_terminal_title(NULL, NULL);
+}
+
+/* Restore the suite title and close its terminal descriptor after every run. */
+static void end_terminal_title(void) {
+    set_terminal_title(NULL, NULL);
+    if (terminal_title_fd >= 0) close(terminal_title_fd);
+    terminal_title_fd = -1;
+}
 
 /* Match a terminal name directly, or its base name across config variants. */
 static bool terminal_name_matches(const char *configured, const char *requested) {
@@ -1514,6 +1560,9 @@ static bool handle_event(char *line, const TerminalConfig *terminal,
         snprintf(active_benchmark, 128, "%s", name);
         *active_bytes = bytes;
         *active = true;
+        if (phase == WORKER_PHASE_BENCHMARK) {
+            set_terminal_title(terminal->name, name);
+        }
         monitor_begin(monitor, monotonic_now_ns());
         return true;
     }
@@ -1989,6 +2038,7 @@ static bool run_startup_benchmark(const TerminalConfig *terminal,
                                  const RunSelection *selection,
                                  const char *executable_path,
                                  SummaryList *summaries) {
+    set_terminal_title(terminal->name, "startup");
     uint64_t *durations = NULL;
     size_t capacity = 0;
     unsigned samples = 0;
@@ -2345,6 +2395,7 @@ static int run_controller(const AppConfig *config, const RunSelection *selection
 int controller_run(const AppConfig *config, const RunSelection *selection,
                    const char *executable_path) {
     stop_signal = 0;
+    begin_terminal_title();
     struct sigaction action = {.sa_handler = request_stop};
     sigemptyset(&action.sa_mask);
     size_t installed = 0;
@@ -2364,5 +2415,6 @@ int controller_run(const AppConfig *config, const RunSelection *selection,
         --installed;
         sigaction(stop_signals[installed], &saved_stop_actions[installed], NULL);
     }
+    end_terminal_title();
     return stop_signal != 0 ? 128 + stop_signal : result;
 }
