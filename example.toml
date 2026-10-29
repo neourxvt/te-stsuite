@@ -14,7 +14,7 @@ startup_min_samples = 10
 startup_timeout_seconds = 30
 # Resource accounting: "cgroupv2" or "polling".
 monitor = "cgroupv2"
-# CPU placement: "cgroupv2" or "taskset".
+# CPU placement: "taskset" or "cgroupv2".
 process_isolation = "taskset"
 
 [typometer.synthetic]
@@ -35,11 +35,8 @@ pause_every = 0
 pause_ms = 1000
 
 [variables]
-# Base16 Default Dark colors. Use {NAME} to substitute values in strings below.
 FONT_FAMILY = "DejaVu Sans Mono"
-# Font size in points; terminals with pixel-based sizing need conversion.
 FONT_SIZE = "11"
-# Zutty uses a filename prefix and integer pixels: 15 px is about 11 pt at 96 DPI.
 FONT_FILE_PREFIX = "DejaVuSansMono"
 FONT_SIZE_PX = "15"
 BASE00 = "#000000"
@@ -62,17 +59,15 @@ BASE0F = "#a16946"
 # Each named table configures a terminal. Its cmd must include {CMD} as a
 # standalone word; pass inline configs through {CFG} or an env reference below.
 # Terminal configs share FONT_FAMILY and FONT_SIZE from [variables].
-# Kitty also offers a profile with latency settings for comparison.
+
 [alacritty]
 cmd = "alacritty --config-file {CFG} -e {CMD}"
 version = { cmd = "alacritty --version" }
-
 [alacritty.configs]
-standard = """
+default = """
 [font]
 normal = { family = "{FONT_FAMILY}" }
 size = {FONT_SIZE}
-
 # Use the shared Base16 palette, matching the other terminal configs.
 [colors]
 indexed_colors = [
@@ -115,11 +110,8 @@ white = "{BASE07}"
 [kitty]
 cmd = "kitty --config {CFG} {CMD}"
 version = { cmd = "kitty --version" }
-
-# Each key names a variant; its string is written to a temporary config file.
-# The terminal command uses {CFG} in place of that file's path.
 [kitty.configs]
-defaults = """
+default = """
 font_family {FONT_FAMILY}
 font_size {FONT_SIZE}
 foreground {BASE05}
@@ -151,8 +143,7 @@ color19 {BASE02}
 color20 {BASE04}
 color21 {BASE06}
 """
-
-minlatency = """
+lowlatency = """
 font_family {FONT_FAMILY}
 font_size {FONT_SIZE}
 foreground {BASE05}
@@ -191,43 +182,44 @@ wayland_enable_ime no
 """
 
 [nrxvt]
-cmd = "nrxvt -e {CMD}"
+cmd = "nrxvt -c {CFG} -e {CMD}"
 version = { cmd = "nrxvt -h", head = 2 }
-
-# X resource clients receive their font settings through XENVIRONMENT.
-[nrxvt.xresources]
-"nrxvt*font" = "xft:{FONT_FAMILY}:size={FONT_SIZE}"
-"nrxvt*skipXIM" = true
-"*.foreground" = "{BASE05}"
-"*.background" = "{BASE00}"
-"*.cursorColor" = "{BASE05}"
-"*.color0" = "{BASE00}"
-"*.color1" = "{BASE08}"
-"*.color2" = "{BASE0B}"
-"*.color3" = "{BASE0A}"
-"*.color4" = "{BASE0D}"
-"*.color5" = "{BASE0E}"
-"*.color6" = "{BASE0C}"
-"*.color7" = "{BASE05}"
-"*.color8" = "{BASE03}"
-"*.color9" = "{BASE08}"
-"*.color10" = "{BASE0B}"
-"*.color11" = "{BASE0A}"
-"*.color12" = "{BASE0D}"
-"*.color13" = "{BASE0E}"
-"*.color14" = "{BASE0C}"
-"*.color15" = "{BASE07}"
-"*.color16" = "{BASE09}"
-"*.color17" = "{BASE0F}"
-"*.color18" = "{BASE01}"
-"*.color19" = "{BASE02}"
-"*.color20" = "{BASE04}"
-"*.color21" = "{BASE06}"
+[nrxvt.configs]
+default = """
+local opt = nrxvt.opt
+opt.font = "xft:{FONT_FAMILY}:size={FONT_SIZE}"
+opt.saveLines = 50000
+opt.skipXIM = true
+opt.foreground = "{BASE05}"
+opt.background = "{BASE00}"
+opt.cursorColor = "{BASE05}"
+opt.color0 = "{BASE00}"
+opt.color1 = "{BASE08}"
+opt.color2 = "{BASE0B}"
+opt.color3 = "{BASE0A}"
+opt.color4 = "{BASE0D}"
+opt.color5 = "{BASE0E}"
+opt.color6 = "{BASE0C}"
+opt.color7 = "{BASE05}"
+opt.color8 = "{BASE03}"
+opt.color9 = "{BASE08}"
+opt.color10 = "{BASE0B}"
+opt.color11 = "{BASE0A}"
+opt.color12 = "{BASE0D}"
+opt.color13 = "{BASE0E}"
+opt.color14 = "{BASE0C}"
+opt.color15 = "{BASE07}"
+opt.color16 = "{BASE09}"
+opt.color17 = "{BASE0F}"
+opt.color18 = "{BASE01}"
+opt.color19 = "{BASE02}"
+opt.color20 = "{BASE04}"
+opt.color21 = "{BASE06}"
+"""
 
 [urxvt]
 cmd = "/usr/bin/urxvt -e {CMD}"
 version = { cmd = "/usr/bin/urxvt -h", head = 2 }
-
 [urxvt.xresources]
 "URxvt*font" = "xft:{FONT_FAMILY}:size={FONT_SIZE}"
 "URxvt*skipXim" = true
@@ -260,8 +252,6 @@ version = { cmd = "/usr/bin/urxvt -h", head = 2 }
 [xterm]
 cmd = "xterm -e {CMD}"
 version = { cmd = "xterm -version" }
-
-# Optional X resources are written to a temporary file for this terminal run.
 [xterm.xresources]
 "xterm*faceName" = "{FONT_FAMILY}"
 "xterm*faceSize" = "{FONT_SIZE}"
@@ -292,42 +282,109 @@ version = { cmd = "xterm -version" }
 "*.color21" = "{BASE06}"
 
 [ghostty]
-# Keep Ghostty's user config from changing the benchmark's terminal setup.
 cmd = "ghostty --config-default-files=false --config-file={CFG} -e {CMD}"
 version = { cmd = "ghostty --version", head = 1 }
 silence_output = true
-
 [ghostty.configs]
-standard = """
+default = """
 font-family = "{FONT_FAMILY}"
 font-size = {FONT_SIZE}
+# Use the shared Base16 palette, matching the other terminal configs.
+foreground = {BASE05}
+background = {BASE00}
+cursor-color = {BASE05}
+cursor-text = {BASE00}
+selection-foreground = {BASE05}
+selection-background = {BASE02}
+palette = 0={BASE00}
+palette = 1={BASE08}
+palette = 2={BASE0B}
+palette = 3={BASE0A}
+palette = 4={BASE0D}
+palette = 5={BASE0E}
+palette = 6={BASE0C}
+palette = 7={BASE05}
+palette = 8={BASE03}
+palette = 9={BASE08}
+palette = 10={BASE0B}
+palette = 11={BASE0A}
+palette = 12={BASE0D}
+palette = 13={BASE0E}
+palette = 14={BASE0C}
+palette = 15={BASE07}
+palette = 16={BASE09}
+palette = 17={BASE0F}
+palette = 18={BASE01}
+palette = 19={BASE02}
+palette = 20={BASE04}
+palette = 21={BASE06}
 """
 
 [rio]
 cmd = "rio -e {CMD}"
 version = { cmd = "rio --version" }
-
-# Rio reads config.toml from the temporary config directory.
 [rio.env]
 RIO_CONFIG_HOME = "{CFG_DIR}"
-
 [rio.configs]
-standard = """
+default = """
 [fonts]
 family = "{FONT_FAMILY}"
 size = {FONT_SIZE}
+# Use the shared Base16 palette, matching the other terminal configs.
+[colors]
+foreground = "{BASE05}"
+background = "{BASE00}"
+cursor = "{BASE05}"
+selection-foreground = "{BASE05}"
+selection-background = "{BASE02}"
+black = "{BASE00}"
+red = "{BASE08}"
+green = "{BASE0B}"
+yellow = "{BASE0A}"
+blue = "{BASE0D}"
+magenta = "{BASE0E}"
+cyan = "{BASE0C}"
+white = "{BASE05}"
+light-black = "{BASE03}"
+light-red = "{BASE08}"
+light-green = "{BASE0B}"
+light-yellow = "{BASE0A}"
+light-blue = "{BASE0D}"
+light-magenta = "{BASE0E}"
+light-cyan = "{BASE0C}"
+light-white = "{BASE07}"
 """
 
 [zutty]
 cmd = "zutty -font '{FONT_FILE_PREFIX}' -fontsize {FONT_SIZE_PX} -e {CMD}"
+version = { cmd = "zutty -help", head = 1 }
+[zutty.xresources]
+"Zutty.fg" = "{BASE05}"
+"Zutty.bg" = "{BASE00}"
+"Zutty.cr" = "{BASE05}"
+"Zutty.color0" = "{BASE00}"
+"Zutty.color1" = "{BASE08}"
+"Zutty.color2" = "{BASE0B}"
+"Zutty.color3" = "{BASE0A}"
+"Zutty.color4" = "{BASE0D}"
+"Zutty.color5" = "{BASE0E}"
+"Zutty.color6" = "{BASE0C}"
+"Zutty.color7" = "{BASE05}"
+"Zutty.color8" = "{BASE03}"
+"Zutty.color9" = "{BASE08}"
+"Zutty.color10" = "{BASE0B}"
+"Zutty.color11" = "{BASE0A}"
+"Zutty.color12" = "{BASE0D}"
+"Zutty.color13" = "{BASE0E}"
+"Zutty.color14" = "{BASE0C}"
+"Zutty.color15" = "{BASE07}"
 
 [konsole]
 cmd = "konsole --separate --profile benchmark -e {CMD}"
+version = { cmd = "konsole --version" }
 [konsole.env]
-# Isolate the named scheme from the user's installed colorschemes.
+DBUS_SESSION_BUS_ADDRESS = "unix:path=/dev/null"
 XDG_DATA_HOME = "{CFG_DIR}"
-
-# Konsole resolves named schemes from the konsole/ data subdirectory.
 [konsole.configs.default.files]
 "konsole/benchmark.profile" = """
 [General]
@@ -382,48 +439,49 @@ Color={BASE0C}
 Color={BASE07}
 """
 
-# [contour]
-# cmd = "contour terminal config {CFG} profile standard {CMD}"
-# version = { cmd = "contour --version" }
-# [contour.configs]
-# standard = """
-# profiles:
-#   standard:
-#     colors: default
-#     font:
-#       size: {FONT_SIZE}
-#       regular:
-#         family: {FONT_FAMILY}
-# # Use the shared Base16 palette, matching the other terminal configs.
-# color_schemes:
-#   default:
-#     default:
-#       foreground: "{BASE05}"
-#       background: "{BASE00}"
-#     cursor:
-#       default: "{BASE05}"
-#       text: "{BASE00}"
-#     selection:
-#       foreground: "{BASE05}"
-#       background: "{BASE02}"
-#       foreground_alpha: 1.0
-#       background_alpha: 1.0
-#     normal:
-#       black: "{BASE00}"
-#       red: "{BASE08}"
-#       green: "{BASE0B}"
-#       yellow: "{BASE0A}"
-#       blue: "{BASE0D}"
-#       magenta: "{BASE0E}"
-#       cyan: "{BASE0C}"
-#       white: "{BASE05}"
-#     bright:
-#       black: "{BASE03}"
-#       red: "{BASE08}"
-#       green: "{BASE0B}"
-#       yellow: "{BASE0A}"
-#       blue: "{BASE0D}"
-#       magenta: "{BASE0E}"
-#       cyan: "{BASE0C}"
-#       white: "{BASE07}"
-# """
+[contour]
+cmd = "contour terminal config {CFG} profile default {CMD}"
+version = { cmd = "contour --version" }
+silence_output = true
+[contour.configs]
+default = """
+profiles:
+  default:
+    colors: default
+    font:
+      size: {FONT_SIZE}
+      regular:
+        family: {FONT_FAMILY}
+# Use the shared Base16 palette, matching the other terminal configs.
+color_schemes:
+  default:
+    default:
+      foreground: "{BASE05}"
+      background: "{BASE00}"
+    cursor:
+      default: "{BASE05}"
+      text: "{BASE00}"
+    selection:
+      foreground: "{BASE05}"
+      background: "{BASE02}"
+      foreground_alpha: 1.0
+      background_alpha: 1.0
+    normal:
+      black: "{BASE00}"
+      red: "{BASE08}"
+      green: "{BASE0B}"
+      yellow: "{BASE0A}"
+      blue: "{BASE0D}"
+      magenta: "{BASE0E}"
+      cyan: "{BASE0C}"
+      white: "{BASE05}"
+    bright:
+      black: "{BASE03}"
+      red: "{BASE08}"
+      green: "{BASE0B}"
+      yellow: "{BASE0A}"
+      blue: "{BASE0D}"
+      magenta: "{BASE0E}"
+      cyan: "{BASE0C}"
+      white: "{BASE07}"
+"""
