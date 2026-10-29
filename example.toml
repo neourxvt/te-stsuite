@@ -68,6 +68,44 @@ standard = """
 [font]
 normal = { family = "{FONT_FAMILY}" }
 size = {FONT_SIZE}.0
+
+# Use the shared Base16 palette, matching the other terminal configs.
+[colors]
+indexed_colors = [
+  { index = 16, color = "{BASE09}" },
+  { index = 17, color = "{BASE0F}" },
+  { index = 18, color = "{BASE01}" },
+  { index = 19, color = "{BASE02}" },
+  { index = 20, color = "{BASE04}" },
+  { index = 21, color = "{BASE06}" },
+]
+[colors.primary]
+foreground = "{BASE05}"
+background = "{BASE00}"
+[colors.cursor]
+cursor = "{BASE05}"
+text = "{BASE00}"
+[colors.selection]
+text = "{BASE05}"
+background = "{BASE02}"
+[colors.normal]
+black = "{BASE00}"
+red = "{BASE08}"
+green = "{BASE0B}"
+yellow = "{BASE0A}"
+blue = "{BASE0D}"
+magenta = "{BASE0E}"
+cyan = "{BASE0C}"
+white = "{BASE05}"
+[colors.bright]
+black = "{BASE03}"
+red = "{BASE08}"
+green = "{BASE0B}"
+yellow = "{BASE0A}"
+blue = "{BASE0D}"
+magenta = "{BASE0E}"
+cyan = "{BASE0C}"
+white = "{BASE07}"
 """
 
 [kitty]
@@ -283,8 +321,41 @@ size = {FONT_SIZE}.0
 # standard = """
 # profiles:
 #   standard:
+#     colors: default
 #     font:
 #       size: {FONT_SIZE}
 #       regular:
 #         family: {FONT_FAMILY}
+# # Use the shared Base16 palette, matching the other terminal configs.
+# color_schemes:
+#   default:
+#     default:
+#       foreground: "{BASE05}"
+#       background: "{BASE00}"
+#     cursor:
+#       default: "{BASE05}"
+#       text: "{BASE00}"
+#     selection:
+#       foreground: "{BASE05}"
+#       background: "{BASE02}"
+#       foreground_alpha: 1.0
+#       background_alpha: 1.0
+#     normal:
+#       black: "{BASE00}"
+#       red: "{BASE08}"
+#       green: "{BASE0B}"
+#       yellow: "{BASE0A}"
+#       blue: "{BASE0D}"
+#       magenta: "{BASE0E}"
+#       cyan: "{BASE0C}"
+#       white: "{BASE05}"
+#     bright:
+#       black: "{BASE03}"
+#       red: "{BASE08}"
+#       green: "{BASE0B}"
+#       yellow: "{BASE0A}"
+#       blue: "{BASE0D}"
+#       magenta: "{BASE0E}"
+#       cyan: "{BASE0C}"
+#       white: "{BASE07}"
 # """
