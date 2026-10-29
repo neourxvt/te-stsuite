@@ -392,12 +392,14 @@ The ported Typometer backend is licensed under Apache-2.0. See
 ## Cell dimensions
 
 The `cell_dimensions` benchmark writes one space with a truecolor red
-background, resets the background color, and captures the visible terminal
-window in memory. It measures the bounding box of reddish pixels and reports
-the cell width and height in pixels in the benchmark output and JSONL result.
+background surrounded by eight blue backgrounded spaces, then resets the
+background color and captures the visible terminal window in memory. It waits
+up to three seconds for the marker to render and measures the red cell only
+when the surrounding blue cells match, excluding unrelated window colors.
+It reports the cell width and height in pixels in the benchmark output and JSONL result.
 It does not save an image file or collect CPU, memory, or wall-time metrics.
 The benchmark requires a native X11 session with a visible, fully on-screen
-terminal window; it does not require XTEST.
+terminal window with at least three rows and columns; it does not require XTEST.
 
 ```sh
 ./build/te-stsuite example.toml -t xterm -b cell_dimensions

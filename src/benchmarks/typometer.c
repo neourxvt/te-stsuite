@@ -756,40 +756,57 @@ bool bench_typometer_execute(const BenchContext *context, const RunOptions *opti
     return ok;
 }
 
-/* Accept antialiased or palette-converted reds without requiring RGB equality. */
-static bool reddish_pixel(XImage *image, int x, int y) {
+/* Accept palette-converted marker colors without requiring RGB equality. */
+static bool marker_pixel(XImage *image, int x, int y, bool blue_marker) {
     unsigned long value = XGetPixel(image, x, y);
     unsigned red = channel(value, image->red_mask);
     unsigned green = channel(value, image->green_mask);
     unsigned blue = channel(value, image->blue_mask);
+    if (blue_marker) {
+        unsigned swap = red;
+        red = blue;
+        blue = swap;
+    }
     unsigned other = green > blue ? green : blue;
     return red >= 64 && red > green + 16 && red > blue + 16 &&
            red * 100 >= other * 115;
 }
 
-/* Bound the red cell while rejecting a terminal background that is itself red. */
-static bool locate_red_cell(Typometer *run, XImage *image, Rectangle *cell) {
-    int left = image->width, top = image->height, right = -1, bottom = -1;
-    size_t red_count = 0;
-    for (int y = 0; y < image->height; ++y) {
-        for (int x = 0; x < image->width; ++x) {
-            if (!reddish_pixel(image, x, y)) continue;
-            if (x < left) left = x;
-            if (x > right) right = x;
-            if (y < top) top = y;
-            if (y > bottom) bottom = y;
-            ++red_count;
+/* A blue ring distinguishes the red space from window chrome and backgrounds. */
+static bool guarded_cell(XImage *image, Rectangle cell) {
+    if (cell.x < cell.width || cell.y < cell.height ||
+        cell.x + 2 * cell.width > image->width ||
+        cell.y + 2 * cell.height > image->height) return false;
+    for (int y = cell.y - cell.height; y < cell.y + 2 * cell.height; ++y) {
+        for (int x = cell.x - cell.width; x < cell.x + 2 * cell.width; ++x) {
+            bool inside = x >= cell.x && x < cell.x + cell.width &&
+                          y >= cell.y && y < cell.y + cell.height;
+            if (!marker_pixel(image, x, y, !inside)) return false;
         }
     }
-    if (right < left || bottom < top)
-        return fail(run, "no reddish terminal pixels appeared after typing the space");
-    int width = right - left + 1, height = bottom - top + 1;
-    size_t screen_pixels = (size_t)image->width * (size_t)image->height;
-    if (width >= image->width / 2 || height >= image->height / 2 ||
-        red_count > screen_pixels / 8)
-        return fail(run, "reddish pixels cover too much of the terminal to isolate one cell");
-    *cell = (Rectangle){left, top, width, height};
     return true;
+}
+
+/* Examine red runs only at their top edge, then verify the entire 3x3 marker. */
+static bool locate_red_cell(XImage *image, Rectangle *cell) {
+    bool found = false;
+    for (int y = 0; y < image->height; ++y) {
+        for (int x = 0; x < image->width; ++x) {
+            if (!marker_pixel(image, x, y, false)) continue;
+            int left = x;
+            while (x + 1 < image->width && marker_pixel(image, x + 1, y, false)) ++x;
+            if (y > 0 && marker_pixel(image, left, y - 1, false)) continue;
+            int bottom = y;
+            while (bottom + 1 < image->height &&
+                   marker_pixel(image, left, bottom + 1, false)) ++bottom;
+            Rectangle candidate = {left, y, x - left + 1, bottom - y + 1};
+            if (!guarded_cell(image, candidate)) continue;
+            if (found) return false;
+            *cell = candidate;
+            found = true;
+        }
+    }
+    return found;
 }
 
 /* Draw one colored space, capture its rendered bounds, and restore the screen. */
@@ -798,10 +815,11 @@ bool bench_cell_dimensions_execute(const BenchContext *context,
                                     BenchBegin begin, void *user,
                                     BenchSamples *samples, char *error,
                                     size_t error_size) {
-    (void)context;
     (void)options;
     if (warmup) return true;
     Typometer run = {.tty = -1, .error = error, .error_size = error_size};
+    if (context->rows < 3 || context->columns < 3)
+        return fail(&run, "cell_dimensions requires at least three rows and columns");
     atomic_init(&run.stop_echo, false);
     atomic_init(&run.echo_failed, false);
     atomic_store(&x11_failed, false);
@@ -815,8 +833,11 @@ bool bench_cell_dimensions_execute(const BenchContext *context,
     bool wrote_test = false;
     if (ok && !begin(user))
         ok = fail(&run, "cannot start cell dimension measurement");
+    /* Explicit row positioning avoids depending on newline or wrapping modes. */
     static const char test[] = "\033c\033[2J\033[H\033[?25l"
-                               "\033[48;2;255;0;0m \033[49m";
+                               "\033[48;2;0;0;255m   "
+                               "\033[2;1H \033[48;2;255;0;0m "
+                               "\033[48;2;0;0;255m \033[3;1H   \033[0m";
     if (ok) {
         wrote_test = true;
         ok = write_bytes(STDOUT_FILENO, test, sizeof(test) - 1);
@@ -824,17 +845,24 @@ bool bench_cell_dimensions_execute(const BenchContext *context,
     }
     Rectangle cell = {0};
     if (ok) {
-        sleep_ns(100000000ULL);
-        XSync(run.display, False);
-        XImage *image = XGetImage(run.display, run.root, run.left, run.top,
-                                  (unsigned)run.width, (unsigned)run.height,
-                                  AllPlanes, ZPixmap);
-        if (image == NULL) {
-            ok = fail(&run, "cannot capture the terminal window pixels");
-        } else {
-            ok = locate_red_cell(&run, image, &cell);
+        /* Mapping the window does not mean its first frame has been painted. */
+        uint64_t until = monotonic_now_ns() + 3000000000ULL;
+        bool found = false;
+        do {
+            sleep_ns(50000000ULL);
+            if (!check_run(&run, false)) { ok = false; break; }
+            XImage *image = XGetImage(run.display, run.root, run.left, run.top,
+                                      (unsigned)run.width, (unsigned)run.height,
+                                      AllPlanes, ZPixmap);
+            if (image == NULL) {
+                ok = fail(&run, "cannot capture the terminal window pixels");
+                break;
+            }
+            found = locate_red_cell(image, &cell);
             XDestroyImage(image);
-        }
+        } while (!found && monotonic_now_ns() < until);
+        if (ok && !found)
+            ok = fail(&run, "no red cell surrounded by blue cells appeared within three seconds");
     }
     if (wrote_test && !write_bytes(STDOUT_FILENO, "\033c", 2))
         ok = fail(&run, "cannot restore the terminal after cell measurement");
