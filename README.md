@@ -135,6 +135,37 @@ inline variants, and each variant must reference its config through the command
 or environment. Environment overrides apply only to that terminal launch and
 are inherited by all its variants. The temporary file and directory are removed
 when the launch ends. Commands without inline variants must not contain `{CFG}`.
+
+For terminals that need named files or a directory layout, a variant can instead
+contain a `files` table. Each key is a relative path and each string is its file
+content, with the same `{NAME}` variable substitutions as string variants:
+
+```toml
+[konsole]
+cmd = "konsole --separate -p ColorScheme=benchmark -e {CMD}"
+
+[konsole.env]
+XDG_DATA_HOME = "{CFG_DIR}"
+
+[konsole.configs.default.files]
+"konsole/benchmark.colorscheme" = """
+[General]
+Description=Benchmark palette
+[Foreground]
+Color={BASE05}
+[Background]
+Color={BASE00}
+"""
+```
+
+The controller creates every file and its parent directories inside the private
+temporary directory before measurement starts, and removes the tree when the
+launch ends, including failures and cancellation. Paths must not be absolute or
+contain empty, `.` or `..` components, and a file cannot also be another file's
+parent directory. File paths are literal; substitutions apply to their contents.
+`{CFG_DIR}` supplies the root directory. `{CFG}` is available only when the
+variant includes `config.toml`; existing string variants still create that file.
+
 The worker runs inside the terminal's PTY. A terminal can
 define a nested `xresources` table, for example `[xterm.xresources]`, with each
 key naming an X resource and each single-line string, integer, float, or

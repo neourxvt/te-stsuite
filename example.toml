@@ -314,6 +314,59 @@ family = "{FONT_FAMILY}"
 size = {FONT_SIZE}.0
 """
 
+[konsole]
+cmd = "konsole --separate -p ColorScheme=benchmark -e {CMD}"
+[konsole.env]
+# Isolate the named scheme from the user's installed colorschemes.
+XDG_DATA_HOME = "{CFG_DIR}"
+
+# Konsole resolves named schemes from the konsole/ data subdirectory.
+[konsole.configs.default.files]
+"konsole/benchmark.colorscheme" = """
+[General]
+Description=Shared Base16 palette
+[Foreground]
+Color={BASE05}
+[Background]
+Color={BASE00}
+[ForegroundIntense]
+Color={BASE05}
+[BackgroundIntense]
+Color={BASE00}
+[Color0]
+Color={BASE00}
+[Color1]
+Color={BASE08}
+[Color2]
+Color={BASE0B}
+[Color3]
+Color={BASE0A}
+[Color4]
+Color={BASE0D}
+[Color5]
+Color={BASE0E}
+[Color6]
+Color={BASE0C}
+[Color7]
+Color={BASE05}
+[Color0Intense]
+Color={BASE03}
+[Color1Intense]
+Color={BASE08}
+[Color2Intense]
+Color={BASE0B}
+[Color3Intense]
+Color={BASE0A}
+[Color4Intense]
+Color={BASE0D}
+[Color5Intense]
+Color={BASE0E}
+[Color6Intense]
+Color={BASE0C}
+[Color7Intense]
+Color={BASE07}
+"""
+
 # [contour]
 # cmd = "contour terminal config {CFG} profile standard {CMD}"
 # version = { cmd = "contour --version" }

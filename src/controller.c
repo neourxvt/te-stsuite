@@ -5,6 +5,8 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
+#include <limits.h>
 #include <math.h>
 #include <poll.h>
 #include <signal.h>
@@ -608,11 +610,18 @@ static char **expand_command(const TerminalConfig *terminal,
         if (strcmp(terminal->env[i].value, "{CFG}") == 0 ||
             strcmp(terminal->env[i].value, "{CFG_DIR}") == 0) env_config = true;
     }
-    if ((terminal->inline_config != NULL &&
+    if ((terminal->config_file_count != 0 &&
          (config_placeholders > 1 || (!env_config && config_placeholders != 1))) ||
-        (terminal->inline_config == NULL && config_placeholders != 0)) {
+        (terminal->config_file_count == 0 && config_placeholders != 0)) {
         snprintf(error, error_size,
                  "terminal '%s' configs require one {CFG} command reference or a {CFG}/{CFG_DIR} env value; commands without configs must not contain {CFG}",
+                 terminal->name);
+        string_list_free(&words);
+        return NULL;
+    }
+    if (config_placeholders != 0 && config_path[0] == '\0') {
+        snprintf(error, error_size,
+                 "terminal '%s' uses {CFG} but has no config.toml file",
                  terminal->name);
         string_list_free(&words);
         return NULL;
@@ -709,12 +718,46 @@ static bool write_temporary_file(const char *content, size_t content_length,
     return true;
 }
 
-/* Use a private directory so env-based loaders can find config.toml directly. */
-static bool write_inline_config(const TerminalConfig *terminal, char *path,
-                                size_t path_size, char *directory,
-                                size_t directory_size, char *error,
-                                size_t error_size) {
-    if (terminal->inline_config == NULL) {
+/* Remove children before their parents, without following directory symlinks. */
+static int remove_config_entry(const char *path, const struct stat *info,
+                                int type, struct FTW *walk) {
+    (void)info;
+    (void)type;
+    (void)walk;
+    return remove(path);
+}
+
+/* Only traverse the private tree created for this launch. */
+static void remove_config_directory(const char *directory) {
+    if (directory[0] != '\0') {
+        nftw(directory, remove_config_entry, 16, FTW_DEPTH | FTW_PHYS);
+    }
+}
+
+/* Create intermediate directories for an already validated relative file path. */
+static bool create_config_parents(char *filename, size_t root_length,
+                                  char *error, size_t error_size) {
+    for (char *slash = strchr(filename + root_length + 1, '/'); slash != NULL;
+         slash = strchr(slash + 1, '/')) {
+        *slash = '\0';
+        int result = mkdir(filename, 0700);
+        int saved_errno = errno;
+        *slash = '/';
+        if (result != 0 && saved_errno != EEXIST) {
+            snprintf(error, error_size, "cannot create config directory: %s",
+                     strerror(saved_errno));
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Prepare every variant file in the controller, before resource measurement. */
+static bool write_terminal_configs(const TerminalConfig *terminal, char *path,
+                                   size_t path_size, char *directory,
+                                   size_t directory_size, char *error,
+                                   size_t error_size) {
+    if (terminal->config_file_count == 0) {
         path[0] = '\0';
         return true;
     }
@@ -729,19 +772,34 @@ static bool write_inline_config(const TerminalConfig *terminal, char *path,
                  strerror(errno));
         return false;
     }
-    char filename[128];
-    if (snprintf(filename, sizeof(filename), "%s/config.toml", directory) >=
-        (int)sizeof(filename)) {
-        snprintf(error, error_size, "temporary config path buffer is too small");
-        rmdir(directory);
-        return false;
+    path[0] = '\0';
+    for (size_t i = 0; i < terminal->config_file_count; ++i) {
+        const TerminalConfigFile *file = &terminal->config_files[i];
+        char filename[PATH_MAX];
+        char written_path[PATH_MAX];
+        if (snprintf(filename, sizeof(filename), "%s/%s", directory, file->path) >=
+            (int)sizeof(filename)) {
+            snprintf(error, error_size, "temporary config file path is too long");
+            goto fail;
+        }
+        if (!create_config_parents(filename, strlen(directory), error, error_size) ||
+            !write_temporary_file(file->content, file->length, filename, "config",
+                                   false, written_path, sizeof(written_path),
+                                   error, error_size)) goto fail;
+        /* Only config.toml supplies the legacy single-file {CFG} reference. */
+        if (strcmp(file->path, "config.toml") == 0 &&
+            snprintf(path, path_size, "%s", written_path) >= (int)path_size) {
+            snprintf(error, error_size, "temporary config path buffer is too small");
+            goto fail;
+        }
     }
-    bool ok = write_temporary_file(
-        terminal->inline_config, terminal->inline_config_length,
-        filename, "config", false, path, path_size,
-        error, error_size);
-    if (!ok) rmdir(directory);
-    return ok;
+    return true;
+
+fail:
+    remove_config_directory(directory);
+    directory[0] = '\0';
+    path[0] = '\0';
+    return false;
 }
 
 /* Create per-run X resources consumed through the XENVIRONMENT variable. */
@@ -759,11 +817,9 @@ static bool write_xresources(const TerminalConfig *terminal, char *path,
 }
 
 /* Remove temporary files after every setup failure and completed launch. */
-static void cleanup_terminal_files(const char *config_path,
-                                   const char *config_dir,
+static void cleanup_terminal_files(const char *config_dir,
                                    const char *xresources_path) {
-    if (config_path[0] != '\0') unlink(config_path);
-    if (config_dir[0] != '\0') rmdir(config_dir);
+    remove_config_directory(config_dir);
     if (xresources_path[0] != '\0') unlink(xresources_path);
 }
 
@@ -2040,7 +2096,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     char config_path[128] = {0};
     char config_dir[64] = {0};
     char xresources_path[80] = {0};
-    if (!write_inline_config(terminal, config_path, sizeof(config_path),
+    if (!write_terminal_configs(terminal, config_path, sizeof(config_path),
                              config_dir, sizeof(config_dir), error,
                              sizeof(error))) {
         report_styled(color_red, "  Error: %s\n", error);
@@ -2051,7 +2107,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                           sizeof(xresources_path), error, sizeof(error))) {
         report_styled(color_red, "  Error: %s\n", error);
         close_control_fifo(control_fd, keepalive_fd, control_path);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         return false;
     }
     MonitorBackend backend = config->monitor_backend;
@@ -2060,7 +2116,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         report_styled(color_red,
                       "  Error: out of memory while creating monitor\n");
         close_control_fifo(control_fd, keepalive_fd, control_path);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         return false;
     }
     size_t argc = 0;
@@ -2072,7 +2128,7 @@ static bool run_terminal(const TerminalConfig *terminal,
     if (argv == NULL) {
         report_styled(color_red, "  Error: %s\n", error);
         close_control_fifo(control_fd, keepalive_fd, control_path);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         monitor_destroy(monitor);
         return false;
     }
@@ -2083,7 +2139,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                       strerror(errno));
         free_argv(argv, argc);
         close_control_fifo(control_fd, keepalive_fd, control_path);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         monitor_destroy(monitor);
         return false;
     }
@@ -2102,7 +2158,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         close(gate[0]);
         close(gate[1]);
         close_control_fifo(control_fd, keepalive_fd, control_path);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         monitor_destroy(monitor);
         return false;
     }
@@ -2116,7 +2172,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         close_pipe_pair(stdout_pipe);
         close_pipe_pair(stderr_pipe);
         close_control_fifo(control_fd, keepalive_fd, control_path);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         monitor_destroy(monitor);
         return false;
     }
@@ -2210,7 +2266,7 @@ static bool run_terminal(const TerminalConfig *terminal,
             if (stderr_fd >= 0) close(stderr_fd);
         }
         close_control_fifo(control_fd, keepalive_fd, control_path);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         monitor_destroy(monitor);
         return false;
     }
@@ -2244,7 +2300,7 @@ static bool run_terminal(const TerminalConfig *terminal,
             if (stderr_fd >= 0) close(stderr_fd);
         }
         close_control_fifo(control_fd, keepalive_fd, control_path);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         monitor_destroy(monitor);
         return false;
     }
@@ -2311,7 +2367,7 @@ static bool run_terminal(const TerminalConfig *terminal,
         }
         close_control_fifo(control_fd, keepalive_fd, control_path);
         monitor_destroy(monitor);
-        cleanup_terminal_files(config_path, config_dir, xresources_path);
+        cleanup_terminal_files(config_dir, xresources_path);
         return false;
     }
 
@@ -2457,7 +2513,7 @@ static bool run_terminal(const TerminalConfig *terminal,
                       strerror(capture_errno));
     }
     monitor_destroy(monitor);
-    cleanup_terminal_files(config_path, config_dir, xresources_path);
+    cleanup_terminal_files(config_dir, xresources_path);
     return stop_signal == 0 && ready && done && !worker_failed &&
            capture_errno == 0 &&
            (phase != WORKER_PHASE_CHECK ||

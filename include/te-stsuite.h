@@ -87,6 +87,13 @@ typedef struct {
     char *value;
 } TerminalEnv;
 
+/* One text file placed at a relative path in a launch's private config tree. */
+typedef struct {
+    char *path;
+    char *content;
+    size_t length;
+} TerminalConfigFile;
+
 /* One configured terminal command from the TOML file. */
 typedef struct {
     char *name;
@@ -97,8 +104,8 @@ typedef struct {
     bool has_version_head;
     /* Suppress emulator output during launches; version probes stay visible. */
     bool silence_output;
-    char *inline_config;
-    size_t inline_config_length;
+    TerminalConfigFile *config_files;
+    size_t config_file_count;
     TerminalEnv *env;
     size_t env_count;
     /* NULL leaves XENVIRONMENT unchanged; an empty string creates an empty file. */

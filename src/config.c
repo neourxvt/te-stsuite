@@ -324,7 +324,11 @@ void config_free(AppConfig *config) {
         free(config->terminals[i].emulator_name);
         free(config->terminals[i].command);
         free(config->terminals[i].version_command);
-        free(config->terminals[i].inline_config);
+        for (size_t j = 0; j < config->terminals[i].config_file_count; ++j) {
+            free(config->terminals[i].config_files[j].path);
+            free(config->terminals[i].config_files[j].content);
+        }
+        free(config->terminals[i].config_files);
         for (size_t j = 0; j < config->terminals[i].env_count; ++j) {
             free(config->terminals[i].env[j].name);
             free(config->terminals[i].env[j].value);
@@ -338,6 +342,83 @@ void config_free(AppConfig *config) {
     }
     free(config->benchmarks);
     memset(config, 0, sizeof(*config));
+}
+
+/* Keep generated files below the private root with unambiguous path components. */
+static bool valid_config_file_path(const char *path, size_t length) {
+    if (length == 0 || memchr(path, '\0', length) != NULL) return false;
+    const char *component = path;
+    const char *end = path + length;
+    while (component < end) {
+        const char *slash = memchr(component, '/', (size_t)(end - component));
+        const char *stop = slash == NULL ? end : slash;
+        size_t size = (size_t)(stop - component);
+        if (size == 0 || (size == 1 && component[0] == '.') ||
+            (size == 2 && component[0] == '.' && component[1] == '.')) {
+            return false;
+        }
+        if (slash == NULL) return true;
+        component = slash + 1;
+    }
+    return false;
+}
+
+/* Normalize legacy strings and named-file variants into the same file list. */
+static bool read_terminal_files(toml_datum_t variant, TerminalConfig *terminal,
+                                const TemplateVariables *variables,
+                                char *error, size_t error_size) {
+    toml_datum_t files = {0};
+    bool legacy = variant.type == TOML_STRING;
+    if (!legacy) {
+        files = toml_get(variant, "files");
+        if (variant.type != TOML_TABLE || variant.u.tab.size != 1 ||
+            files.type != TOML_TABLE || files.u.tab.size <= 0) {
+            snprintf(error, error_size,
+                     "terminal '%s' config variants must be strings or tables containing a nonempty files table",
+                     terminal->name);
+            return false;
+        }
+    }
+    size_t count = legacy ? 1 : (size_t)files.u.tab.size;
+    terminal->config_files = calloc(count, sizeof(*terminal->config_files));
+    if (terminal->config_files == NULL) goto memory_error;
+    for (size_t i = 0; i < count; ++i) {
+        const char *path = legacy ? "config.toml" : files.u.tab.key[i];
+        size_t length = legacy ? strlen(path) : (size_t)files.u.tab.len[i];
+        if (!valid_config_file_path(path, length)) {
+            snprintf(error, error_size,
+                     "terminal '%s' config file paths must be relative and contain no empty, '.' or '..' components or NUL bytes",
+                     terminal->name);
+            return false;
+        }
+        /* Reject file/directory conflicts before creating any launch files. */
+        for (size_t j = 0; j < i; ++j) {
+            const char *previous = terminal->config_files[j].path;
+            size_t previous_length = strlen(previous);
+            if ((previous_length < length &&
+                 memcmp(path, previous, previous_length) == 0 &&
+                 path[previous_length] == '/') ||
+                (length < previous_length &&
+                 memcmp(path, previous, length) == 0 && previous[length] == '/')) {
+                snprintf(error, error_size,
+                         "terminal '%s' config files cannot also be parent directories",
+                         terminal->name);
+                return false;
+            }
+        }
+        TerminalConfigFile *file = &terminal->config_files[terminal->config_file_count++];
+        file->path = strndup(path, length);
+        if (file->path == NULL) goto memory_error;
+        file->content = template_toml_string(legacy ? variant : files.u.tab.value[i],
+                                              variables, &file->length,
+                                              error, error_size);
+        if (file->content == NULL) return false;
+    }
+    return true;
+
+memory_error:
+    snprintf(error, error_size, "out of memory while loading terminal config files");
+    return false;
 }
 
 /* Preserve literal environment values and validate optional config references. */
@@ -375,13 +456,30 @@ static bool read_terminal_env(toml_datum_t table, TerminalConfig *terminal,
         (void)value_length;
         bool config_ref = strstr(text, "{CFG}") != NULL ||
                           strstr(text, "{CFG_DIR}") != NULL;
-        if (config_ref && (terminal->inline_config == NULL ||
+        if (config_ref && (terminal->config_file_count == 0 ||
             (strcmp(text, "{CFG}") != 0 && strcmp(text, "{CFG_DIR}") != 0))) {
             snprintf(error, error_size,
                      "terminal '%s' env config references must be exactly {CFG} or {CFG_DIR} and require configs",
                      terminal->name);
             free(text);
             return false;
+        }
+        /* {CFG} keeps its existing meaning: the generated config.toml file. */
+        if (strcmp(text, "{CFG}") == 0) {
+            bool has_primary = false;
+            for (size_t j = 0; j < terminal->config_file_count; ++j) {
+                if (strcmp(terminal->config_files[j].path, "config.toml") == 0) {
+                    has_primary = true;
+                    break;
+                }
+            }
+            if (!has_primary) {
+                snprintf(error, error_size,
+                         "terminal '%s' uses {CFG} but has no config.toml file",
+                         terminal->name);
+                free(text);
+                return false;
+            }
         }
         TerminalEnv *entry = &terminal->env[terminal->env_count++];
         entry->name = strndup(name, (size_t)length);
@@ -411,11 +509,9 @@ static bool append_terminal(AppConfig *config, const char *name,
     (void)command_length;
     char *name_copy = NULL;
     char *emulator_name_copy = strdup(name);
-    char *content_copy = NULL;
     char *version_copy = version_command == NULL
                              ? NULL
                              : strdup(version_command);
-    size_t content_length = 0;
     char *xresources_copy = NULL;
     size_t xresources_length = 0;
 
@@ -438,24 +534,19 @@ static bool append_terminal(AppConfig *config, const char *name,
                 name_copy = NULL;
             }
         }
-        content_copy = template_toml_string(variant_content, variables,
-                                            &content_length, error,
-                                            error_size);
     } else {
         name_copy = strdup(name);
     }
 
     if (command_copy == NULL || name_copy == NULL ||
         emulator_name_copy == NULL || command_copy[0] == '\0' ||
-        (has_variant && content_copy == NULL) ||
         (version_command != NULL && version_copy == NULL)) {
         snprintf(error, error_size,
-                 "terminal '%s' needs a nonempty cmd and each config variant needs a nonempty name and string content",
+                 "terminal '%s' needs a nonempty cmd and each config variant needs a nonempty name",
                  name);
         free(command_copy);
         free(name_copy);
         free(emulator_name_copy);
-        free(content_copy);
         free(version_copy);
         free(xresources_copy);
         return false;
@@ -469,7 +560,6 @@ static bool append_terminal(AppConfig *config, const char *name,
         free(command_copy);
         free(name_copy);
         free(emulator_name_copy);
-        free(content_copy);
         free(version_copy);
         free(xresources_copy);
         return false;
@@ -483,12 +573,13 @@ static bool append_terminal(AppConfig *config, const char *name,
         .version_head = version_head,
         .has_version_head = has_version_head,
         .silence_output = silence_output,
-        .inline_config = content_copy,
-        .inline_config_length = content_length,
         .xresources = xresources_copy,
         .xresources_length = xresources_length,
     };
-    return read_terminal_env(env, &config->terminals[config->terminal_count - 1],
+    TerminalConfig *terminal = &config->terminals[config->terminal_count - 1];
+    if (has_variant && !read_terminal_files(variant_content, terminal, variables,
+                                           error, error_size)) return false;
+    return read_terminal_env(env, terminal,
                              variables, error, error_size);
 }
 
@@ -783,7 +874,7 @@ bool config_load(const char *path, AppConfig *config, char *error,
         if (variants.type != TOML_UNKNOWN &&
             (variants.type != TOML_TABLE || variants.u.tab.size <= 0)) {
             snprintf(error, error_size,
-                     "terminal '%s' configs must be a nonempty table of inline config strings",
+                     "terminal '%s' configs must be a nonempty table of config variants",
                      key);
             toml_free(result);
             config_free(config);
