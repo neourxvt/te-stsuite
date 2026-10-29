@@ -37,7 +37,11 @@ pause_ms = 1000
 [variables]
 # Base16 Default Dark colors. Use {NAME} to substitute values in strings below.
 FONT_FAMILY = "DejaVu Sans Mono"
+# Font size in points; terminals with pixel-based sizing need conversion.
 FONT_SIZE = "11"
+# Zutty uses a filename prefix and integer pixels: 15 px is about 11 pt at 96 DPI.
+FONT_FILE_PREFIX = "DejaVuSansMono"
+FONT_SIZE_PX = "15"
 BASE00 = "#000000"
 BASE01 = "#282828"
 BASE02 = "#383838"
@@ -67,7 +71,7 @@ version = { cmd = "alacritty --version" }
 standard = """
 [font]
 normal = { family = "{FONT_FAMILY}" }
-size = {FONT_SIZE}.0
+size = {FONT_SIZE}
 
 # Use the shared Base16 palette, matching the other terminal configs.
 [colors]
@@ -117,7 +121,7 @@ version = { cmd = "kitty --version" }
 [kitty.configs]
 defaults = """
 font_family {FONT_FAMILY}
-font_size {FONT_SIZE}.0
+font_size {FONT_SIZE}
 foreground {BASE05}
 background {BASE00}
 cursor {BASE05}
@@ -150,7 +154,7 @@ color21 {BASE06}
 
 minlatency = """
 font_family {FONT_FAMILY}
-font_size {FONT_SIZE}.0
+font_size {FONT_SIZE}
 foreground {BASE05}
 background {BASE00}
 cursor {BASE05}
@@ -311,17 +315,28 @@ RIO_CONFIG_HOME = "{CFG_DIR}"
 standard = """
 [fonts]
 family = "{FONT_FAMILY}"
-size = {FONT_SIZE}.0
+size = {FONT_SIZE}
 """
 
+[zutty]
+cmd = "zutty -font '{FONT_FILE_PREFIX}' -fontsize {FONT_SIZE_PX} -e {CMD}"
+
 [konsole]
-cmd = "konsole --separate -p ColorScheme=benchmark -e {CMD}"
+cmd = "konsole --separate --profile benchmark -e {CMD}"
 [konsole.env]
 # Isolate the named scheme from the user's installed colorschemes.
 XDG_DATA_HOME = "{CFG_DIR}"
 
 # Konsole resolves named schemes from the konsole/ data subdirectory.
 [konsole.configs.default.files]
+"konsole/benchmark.profile" = """
+[General]
+Name=benchmark
+[Appearance]
+# QFont serialization starts with the family, point size and pixel-size override.
+Font={FONT_FAMILY},{FONT_SIZE},-1,5,50,0,0,0,0,0
+ColorScheme=benchmark
+"""
 "konsole/benchmark.colorscheme" = """
 [General]
 Description=Shared Base16 palette
